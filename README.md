@@ -45,7 +45,7 @@ uv sync
 
 ### 1. Prepare Data
 
-Download and process OC20 data:
+Download and process OC20 (Open Catalyst 2020) data:
 
 ```bash
 # Download OC20 dataset (requires ~50GB disk space)
@@ -54,33 +54,42 @@ bash scripts/data/download_data.sh
 # Extract metadata from raw LMDB files
 bash scripts/data/extract_metadata.sh
 
-# Convert to MinCatFlow format
+# Convert to MinCatFlow format (outputs to dataset/train/ and dataset/val_id/)
 bash scripts/data/process_oc20.sh train
 bash scripts/data/process_oc20.sh val_id
 ```
 
+The processed data contains ~460K adsorbate+catalyst structures from DFT calculations.
+
 ### 2. Train a Model
 
 ```bash
-# Train original implementation
+# Train with full config (1000 epochs, full model)
 bash scripts/training/run_original.sh
 
-# Or train reimplementation
+# Or train reimplementation (identical results)
 bash scripts/training/run_reimpl.sh
 
-# For quick testing (2 epochs, small model)
+# Quick test run (2 epochs, small model, uses processed OC20 data)
 PYTHONPATH=. uv run python src/scripts/train_original.py configs/original/test.yaml
 ```
+
+**Training modes** (set in config):
+- `dng: true` - De novo generation (predicts elements + coordinates)
+- `dng: false` - Structure prediction (predicts coordinates only)
 
 ### 3. Generate Structures
 
 ```bash
-# Generate new catalyst structures
+# De novo generation (with DNG mode - predicts elements)
 PYTHONPATH=. uv run python src/scripts/generate.py \
     configs/original/test.yaml \
     --checkpoint data/original/test_wandb/checkpoints/last.ckpt \
     --num_samples 10 \
     --sampling_steps 50
+
+# Structure prediction (without DNG - uses ground truth elements)
+# Set dng: false in config before training
 ```
 
 ## Project Structure
@@ -143,6 +152,57 @@ Input → AtomAttentionEncoder → TokenTransformer → AtomAttentionDecoder →
 3. **AtomAttentionDecoder**: Broadcasts tokens back to atom level
    - Outputs: coordinates, lattice parameters, supercell matrix, scaling factor
    - Optional: element predictions (DNG mode)
+
+## Usage Modes
+
+MinCatFlow supports two primary usage modes:
+
+### 1. Structure Prediction Mode (`dng: false`)
+
+In this mode, the model predicts **atomic coordinates only** given known element types. Use this when:
+- You know the composition of the catalyst (which elements are present)
+- You want to predict/refine atomic positions for a known material
+- You're doing structure relaxation or optimization
+
+```yaml
+# configs/*/default.yaml
+model:
+  flow_model_args:
+    dng: false  # Disable element prediction
+```
+
+**Inputs**: Element types, lattice hints, adsorbate composition
+**Outputs**: Optimized coordinates, lattice parameters, supercell matrix
+
+### 2. De Novo Generation Mode (`dng: true`)
+
+In this mode, the model predicts **both elements AND coordinates** from scratch. Use this when:
+- You want to discover new catalyst compositions
+- You're exploring the chemical space of possible catalysts
+- You want fully generative structure prediction
+
+```yaml
+# configs/*/default.yaml
+model:
+  flow_model_args:
+    dng: true   # Enable element prediction (Dynamic Nuclear Graph)
+
+training:
+  prim_slab_element_loss_weight: 5.0  # Weight for element prediction loss
+```
+
+**Inputs**: Structure size/shape constraints
+**Outputs**: Predicted elements, coordinates, lattice parameters, supercell matrix
+
+### Mode Comparison
+
+| Feature | Structure Prediction | De Novo Generation |
+|---------|---------------------|-------------------|
+| Element types | Given as input | Predicted by model |
+| Use case | Refine known materials | Discover new materials |
+| Config setting | `dng: false` | `dng: true` |
+| Additional loss | None | `prim_slab_element_loss` |
+| Output | Coordinates only | Elements + Coordinates |
 
 ## Configuration
 
