@@ -1,70 +1,148 @@
 #!/bin/bash
-# Download and prepare training data for MinCatFlow
+# Download and prepare data for MinCatFlow training
 #
-# This script downloads the OC20/OC22 catalyst dataset and prepares it
-# in LMDB format for training.
+# MinCatFlow Data Format
+# ----------------------
+# MinCatFlow uses a CUSTOM LMDB format that is DIFFERENT from standard OC20/OC22 LMDBs.
+# Each sample contains:
+#   - primitive_slab: ASE Atoms (decomposed primitive cell, NOT full supercell)
+#   - supercell_matrix: numpy array (3x3) that transforms primitive -> supercell
+#   - ads_atomic_numbers: numpy array of adsorbate atomic numbers
+#   - ads_pos: numpy array (N, 3) of adsorbate positions
+#   - ref_ads_pos: numpy array (N, 3) of reference adsorbate positions
+#   - n_slab: int, number of slab layers
+#   - n_vac: int, number of vacuum layers
+#   - ref_energy: float, reference adsorption energy
+#
+# This preprocessing involves:
+#   1. Finding the primitive cell from the supercell slab
+#   2. Computing the supercell transformation matrix
+#   3. Extracting adsorbate atoms from the catalyst system
+#   4. Computing reference energies
+#
+# Data Options
+# ------------
+# Option 1: Use synthetic data for testing (already included)
+#   - Run: uv run python src/scripts/create_synthetic_data.py
+#   - Creates: dataset/train/dataset.lmdb, dataset/val_id/dataset.lmdb
+#
+# Option 2: Download OC20 IS2RE data (standard OC20 format, NOT MinCatFlow format)
+#   - This script downloads standard OC20 LMDBs
+#   - These need conversion to MinCatFlow format (see src/scripts/convert_oc20_to_mincatflow.py)
+#
+# Option 3: Get preprocessed MinCatFlow-format data from the authors
+#   - Contact: https://github.com/sungsoo-ahn/MinCatFlow
 #
 # Usage:
-#   bash scripts/data/download_data.sh
+#   bash scripts/data/download_data.sh [option]
 #
-# The data will be stored in:
-#   dataset/train/dataset.lmdb
-#   dataset/val_id/dataset.lmdb
+# Options:
+#   synthetic  - Create synthetic test data (default, fast)
+#   oc20       - Download OC20 IS2RE data (large download)
+#   info       - Show data format information only
 
 set -e
 
-DATA_DIR="${DATA_DIR:-./dataset}"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$PROJECT_ROOT"
+
+OPTION="${1:-synthetic}"
+DATA_DIR="${DATA_DIR:-dataset}"
 
 echo "============================================"
-echo "MinCatFlow Data Download Script"
+echo "MinCatFlow Data Preparation"
 echo "============================================"
 echo ""
-echo "Data directory: $DATA_DIR"
-echo ""
 
-mkdir -p "$DATA_DIR"
+case "$OPTION" in
+    synthetic)
+        echo "Creating synthetic test data..."
+        echo "Output: $DATA_DIR/"
+        echo ""
+        uv run python src/scripts/create_synthetic_data.py \
+            --output "$DATA_DIR" \
+            --n-train 100 \
+            --n-val 20
+        echo ""
+        echo "Done! Synthetic data created at: $DATA_DIR/"
+        echo ""
+        echo "Note: This is synthetic data for testing the pipeline."
+        echo "For real training, you need MinCatFlow-format data."
+        ;;
 
-# Check if fairchem-core is installed
-if ! uv run python -c "import fairchem" 2>/dev/null; then
-    echo "ERROR: fairchem-core is not installed."
-    echo "Please run: uv add fairchem-core"
-    exit 1
-fi
+    oc20)
+        echo "Downloading OC20 IS2RE data..."
+        echo ""
+        echo "WARNING: This downloads standard OC20 LMDB format."
+        echo "         It requires conversion to MinCatFlow format."
+        echo ""
 
-echo "Option 1: Download pre-built LMDB (if available)"
-echo "------------------------------------------------"
-echo "If pre-built LMDB files are available from the MinCatFlow authors,"
-echo "download them directly to:"
-echo "  $DATA_DIR/train/dataset.lmdb"
-echo "  $DATA_DIR/val_id/dataset.lmdb"
-echo ""
+        OC20_DIR="$DATA_DIR/oc20_raw"
+        mkdir -p "$OC20_DIR"
 
-echo "Option 2: Build from OC20/OC22"
-echo "------------------------------"
-echo "To build LMDB from raw OC20/OC22 data:"
-echo ""
-echo "1. Download the OC20 dataset from:"
-echo "   https://github.com/Open-Catalyst-Project/ocp/blob/main/DATASET.md"
-echo ""
-echo "2. Run the data processing script (to be implemented):"
-echo "   uv run python src/scripts/build_lmdb.py configs/data/build_lmdb.yaml"
-echo ""
+        # Download IS2RE train data (smaller, LMDB format)
+        echo "Downloading IS2RE train (10k split)..."
+        wget -c https://dl.fbaipublicfiles.com/opencatalystproject/data/is2res_train_val_test_lmdbs.tar.gz \
+            -O "$OC20_DIR/is2res_train_val_test_lmdbs.tar.gz"
 
-echo "Option 3: Create synthetic test data"
-echo "------------------------------------"
-echo "For testing the pipeline with synthetic data:"
-echo "   uv run python src/scripts/create_synthetic_data.py --output $DATA_DIR"
-echo ""
+        echo ""
+        echo "Extracting..."
+        tar -xzf "$OC20_DIR/is2res_train_val_test_lmdbs.tar.gz" -C "$OC20_DIR"
 
-# Check if data already exists
-if [ -f "$DATA_DIR/train/dataset.lmdb" ]; then
-    echo "Found existing training data at: $DATA_DIR/train/dataset.lmdb"
-else
-    echo "No training data found."
-    echo "Please follow one of the options above to obtain the data."
-fi
+        echo ""
+        echo "Done! OC20 IS2RE data downloaded to: $OC20_DIR/"
+        echo ""
+        echo "NEXT STEPS:"
+        echo "1. Convert to MinCatFlow format using:"
+        echo "   uv run python src/scripts/convert_oc20_to_mincatflow.py"
+        echo ""
+        echo "2. Or use synthetic data for initial testing:"
+        echo "   bash scripts/data/download_data.sh synthetic"
+        ;;
 
-echo ""
-echo "============================================"
-echo "Data download script complete"
-echo "============================================"
+    info)
+        echo "MinCatFlow LMDB Data Format"
+        echo "==========================="
+        echo ""
+        echo "Each sample in the LMDB contains:"
+        echo ""
+        echo "  primitive_slab: ASE Atoms object"
+        echo "    - Primitive unit cell of the slab (NOT supercell)"
+        echo "    - Contains atomic numbers and positions"
+        echo "    - Cell vectors define primitive lattice"
+        echo ""
+        echo "  supercell_matrix: numpy array (3, 3)"
+        echo "    - Transformation matrix: primitive -> supercell"
+        echo "    - supercell = primitive @ supercell_matrix"
+        echo ""
+        echo "  ads_atomic_numbers: numpy array (N,)"
+        echo "    - Atomic numbers of adsorbate atoms"
+        echo ""
+        echo "  ads_pos: numpy array (N, 3)"
+        echo "    - Cartesian positions of adsorbate atoms"
+        echo ""
+        echo "  ref_ads_pos: numpy array (N, 3)"
+        echo "    - Reference adsorbate positions (ground truth)"
+        echo ""
+        echo "  n_slab: int"
+        echo "    - Number of slab atomic layers"
+        echo ""
+        echo "  n_vac: int"
+        echo "    - Number of vacuum layers for z-scaling"
+        echo ""
+        echo "  ref_energy: float (optional)"
+        echo "    - Reference adsorption energy in eV"
+        echo ""
+        echo "Key Differences from Standard OC20 LMDB:"
+        echo "  - OC20 stores full catalyst+adsorbate structures"
+        echo "  - MinCatFlow decomposes into primitive slab + supercell matrix"
+        echo "  - This decomposition enables flow matching on primitive cells"
+        ;;
+
+    *)
+        echo "Unknown option: $OPTION"
+        echo ""
+        echo "Usage: bash scripts/data/download_data.sh [synthetic|oc20|info]"
+        exit 1
+        ;;
+esac
