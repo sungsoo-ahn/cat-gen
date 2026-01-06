@@ -1,8 +1,9 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 from torch.nn import Module
 
 from src.reimplementation.data.prior import PriorSampler, CatPriorSampler
@@ -16,6 +17,54 @@ from src.reimplementation.models.layers import (
 )
 from src.reimplementation.models.utils import LinearNoBias, center_random_augmentation, default
 from src.reimplementation.scripts.refine_sc_mat import refine_sc_mat
+
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+# Small epsilon for numerical stability in flow computation.
+# Used in denominator (1 - t + eps) to prevent division by zero as t -> 1.
+# Value chosen to be small enough not to affect results but large enough
+# to prevent numerical overflow (1e-5 gives ~10^5 max magnitude).
+FLOW_EPSILON = 1e-5
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def compute_flow_vector(
+    predicted: Tensor,
+    current: Tensor,
+    t: Union[float, Tensor],
+    eps: float = FLOW_EPSILON,
+) -> Tensor:
+    """Compute flow vector field for ODE integration.
+
+    The flow is defined as: flow = (x_1_pred - x_t) / (1 - t)
+    where x_1_pred is the model's prediction of the final state.
+
+    Args:
+        predicted: Model's prediction of final state x_1
+        current: Current state x_t
+        t: Current timestep (scalar or tensor)
+        eps: Small epsilon for numerical stability
+
+    Returns:
+        Flow vector of same shape as predicted/current
+    """
+    # Ensure t is broadcastable
+    if isinstance(t, float):
+        divisor = 1.0 - t + eps
+    else:
+        # Handle tensor t - reshape for proper broadcasting
+        divisor = 1.0 - t + eps
+        # Add dimensions as needed based on predicted shape
+        while divisor.dim() < predicted.dim():
+            divisor = divisor.unsqueeze(-1)
+
+    return (predicted - current) / divisor
 
 
 class FlowModule(nn.Module):
@@ -707,12 +756,12 @@ class AtomFlowMatching(Module):
                     network_condition_kwargs=network_condition_kwargs,
                 )
 
-            # Calculate the flow (vector field)
-            flow_prim_slab_coords = (pred_prim_slab_coords_1 - prim_slab_coords_t) / (1 - t + 1e-5)
-            flow_ads_coords = (pred_ads_coords_1 - ads_coords_t) / (1 - t + 1e-5)
-            flow_lattice = (pred_lattice_1 - lattice_t) / (1 - t + 1e-5)
-            flow_supercell_matrix = (pred_supercell_matrix_1 - supercell_matrix_t) / (1 - t + 1e-5)
-            flow_scaling_factor = (pred_scaling_factor_1 - scaling_factor_t) / (1 - t + 1e-5)
+            # Calculate the flow (vector field) using helper for numerical stability
+            flow_prim_slab_coords = compute_flow_vector(pred_prim_slab_coords_1, prim_slab_coords_t, t.item())
+            flow_ads_coords = compute_flow_vector(pred_ads_coords_1, ads_coords_t, t.item())
+            flow_lattice = compute_flow_vector(pred_lattice_1, lattice_t, t.item())
+            flow_supercell_matrix = compute_flow_vector(pred_supercell_matrix_1, supercell_matrix_t, t.item())
+            flow_scaling_factor = compute_flow_vector(pred_scaling_factor_1, scaling_factor_t, t.item())
 
             # Perform one step of Euler's method
             dt = t_next - t
@@ -728,16 +777,14 @@ class AtomFlowMatching(Module):
                 pred_element_logits = pred_element_1  # (B*mult, N, NUM_ELEMENTS)
                 x_1_probs = F.softmax(pred_element_logits, dim=-1)  # (B*mult, N, NUM_ELEMENTS)
                 x_1 = torch.distributions.Categorical(x_1_probs).sample() + 1  # (B*mult, N), 1-indexed
-                
+
                 # Rate-based transition (OMatG DiscreteFlowMatchingMask style)
-                eps = 1e-5
-                
-                # Unmask rate: dt / (1 - t)
+                # Unmask rate: dt / (1 - t), clamped to [0, 1] for valid probability
                 # Higher rate as t approaches 1 (more aggressive unmasking near the end)
-                unmask_rate = dt / (1.0 - t + eps)
+                unmask_rate = (dt / (1.0 - t + FLOW_EPSILON)).clamp(0.0, 1.0)
                 will_unmask = torch.rand_like(prim_slab_element_t.float()) < unmask_rate
                 will_unmask = will_unmask & (prim_slab_element_t == MASK_TOKEN_INDEX)  # Only unmask MASK tokens
-                
+
                 # Apply unmask transition
                 prim_slab_element_t = torch.where(will_unmask, x_1, prim_slab_element_t)
 

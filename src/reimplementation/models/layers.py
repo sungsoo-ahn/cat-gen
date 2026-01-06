@@ -1,5 +1,6 @@
 from einops import rearrange
 from typing import Optional
+import logging
 
 import torch
 import torch.nn.functional as F
@@ -9,12 +10,40 @@ from torch.nn import Module
 from src.reimplementation.models.utils import LinearNoBias
 from src.reimplementation.models.transformers import DiT, PositionalEmbedder
 
+logger = logging.getLogger(__name__)
+
 # Number of elements for one-hot encoding (covers most elements in periodic table)
 NUM_ELEMENTS = 100
 
 # Discrete Flow Matching constants (for dng=True mode)
 MASK_TOKEN_INDEX = 0  # Mask token index (used as prior in DFM)
 NUM_ELEMENTS_WITH_MASK = NUM_ELEMENTS + 1  # 101 (0=MASK, 1-100=elements)
+
+
+def _clamp_element_indices(
+    tensor: torch.Tensor,
+    min_val: int,
+    max_val: int,
+    context: str = "element",
+) -> torch.Tensor:
+    """Clamp element indices to valid range with optional warning.
+
+    Args:
+        tensor: Input tensor with element indices
+        min_val: Minimum valid value (inclusive)
+        max_val: Maximum valid value (inclusive)
+        context: Description for logging (e.g., "prim_slab_element")
+
+    Returns:
+        Clamped tensor
+    """
+    out_of_range = (tensor < min_val) | (tensor > max_val)
+    if out_of_range.any():
+        num_invalid = out_of_range.sum().item()
+        logger.warning(
+            f"{context}: {num_invalid} values out of range [{min_val}, {max_val}], clamping"
+        )
+    return tensor.clamp(min_val, max_val)
 
 
 class AtomAttentionEncoder(Module):
@@ -111,35 +140,41 @@ class AtomAttentionEncoder(Module):
         # Features: atom_pad_mask (1) + element one-hot
         # dng=True: prim_slab_element_t is integer tensor (0=MASK, 1-100=elements) → one-hot with MASK
         # dng=False: use ref_prim_slab_element directly → one-hot without MASK
+        n_prim_slab = N  # Track actual prim_slab atom count for return value
         if prim_slab_element_t is not None and self.dng:
             # dng=True: prim_slab_element_t is integer tensor (B*mult, N_actual)
             # Values: 0=MASK, 1-100=element atomic numbers
             B_mult = prim_slab_element_t.shape[0]
             N_actual = prim_slab_element_t.shape[1]
             B_x, N_x, _ = prim_slab_x_t.shape
-            
-            # Ensure N_actual matches prim_slab_x_t
+
+            # Ensure N_actual matches prim_slab_x_t shape
             if N_actual != N_x:
-                N_actual = N_x
-                prim_slab_element_t = prim_slab_element_t[:, :N_actual]
-            
+                n_prim_slab = N_x
+                prim_slab_element_t = prim_slab_element_t[:, :n_prim_slab]
+            else:
+                n_prim_slab = N_actual
+
             # Convert integer tensor to one-hot with MASK token
-            # prim_slab_element_t: (B*mult, N_actual) integer tensor (0=MASK, 1-100=elements)
+            # prim_slab_element_t: (B*mult, n_prim_slab) integer tensor (0=MASK, 1-100=elements)
+            clamped_element = _clamp_element_indices(
+                prim_slab_element_t, 0, NUM_ELEMENTS_WITH_MASK - 1, "prim_slab_element_t"
+            )
             prim_slab_element_onehot = F.one_hot(
-                prim_slab_element_t.clamp(0, NUM_ELEMENTS_WITH_MASK - 1).long(),
+                clamped_element.long(),
                 num_classes=NUM_ELEMENTS_WITH_MASK
-            ).float()  # (B*mult, N_actual, NUM_ELEMENTS_WITH_MASK)
-            
-            # mask needs multiplicity applied and sliced to match N_actual
+            ).float()  # (B*mult, n_prim_slab, NUM_ELEMENTS_WITH_MASK)
+
+            # mask needs multiplicity applied and sliced to match n_prim_slab
             prim_slab_mask_for_feats = feats["prim_slab_atom_pad_mask"].repeat_interleave(multiplicity, 0)
-            prim_slab_mask_for_feats = prim_slab_mask_for_feats[:, :N_actual]
-            
-            # Update N to N_actual for later use
-            N = N_actual
+            prim_slab_mask_for_feats = prim_slab_mask_for_feats[:, :n_prim_slab]
         else:
             # dng=False: existing approach (no MASK token)
+            clamped_element = _clamp_element_indices(
+                feats["ref_prim_slab_element"], 0, NUM_ELEMENTS - 1, "ref_prim_slab_element"
+            )
             prim_slab_element_onehot = F.one_hot(
-                feats["ref_prim_slab_element"].clamp(0, NUM_ELEMENTS - 1), 
+                clamped_element,
                 num_classes=NUM_ELEMENTS
             ).float()  # (B, N, NUM_ELEMENTS)
             prim_slab_mask_for_feats = feats["prim_slab_atom_pad_mask"]  # (B, N)
@@ -158,14 +193,19 @@ class AtomAttentionEncoder(Module):
 
         # === Adsorbate features ===
         # Features: atom_pad_mask (1) + element one-hot (NUM_ELEMENTS)
+        clamped_ads_element = _clamp_element_indices(
+            feats["ref_ads_element"], 0, NUM_ELEMENTS - 1, "ref_ads_element"
+        )
         ads_element_onehot = F.one_hot(
-            feats["ref_ads_element"].clamp(0, NUM_ELEMENTS - 1), 
+            clamped_ads_element,
             num_classes=NUM_ELEMENTS
         ).float()  # (B, M, NUM_ELEMENTS)
         
         ref_ads_pos = feats["ref_ads_pos"] # (B, M, 3)
-        
-        bind_atom_idx = feats["bind_ads_atom"].clamp(0, NUM_ELEMENTS - 1) # (B)
+
+        bind_atom_idx = _clamp_element_indices(
+            feats["bind_ads_atom"], 0, NUM_ELEMENTS - 1, "bind_ads_atom"
+        )  # (B)
         bind_atom_onehot = F.one_hot(bind_atom_idx, num_classes=NUM_ELEMENTS).float() # (B, NUM_ELEMENTS)
         bind_atom_expanded = bind_atom_onehot.unsqueeze(1).expand(-1, M, -1) # (B, M, NUM_ELEMENTS)
         
@@ -189,11 +229,11 @@ class AtomAttentionEncoder(Module):
         q = c
 
         # === Add noisy positions ===
-        # Concat noisy coords: prim_slab_x_t (B*mult, N, 3) + ads_x_t (B*mult, M, 3)
-        # Ensure prim_slab_x_t matches N (may need slicing if N was updated)
-        if prim_slab_x_t.shape[1] != N:
-            prim_slab_x_t = prim_slab_x_t[:, :N, :]
-        x_t = torch.cat([prim_slab_x_t, ads_x_t], dim=1)  # (B*mult, N+M, 3)
+        # Concat noisy coords: prim_slab_x_t (B*mult, n_prim_slab, 3) + ads_x_t (B*mult, M, 3)
+        # Ensure prim_slab_x_t matches n_prim_slab (may need slicing if dimension changed)
+        if prim_slab_x_t.shape[1] != n_prim_slab:
+            prim_slab_x_t = prim_slab_x_t[:, :n_prim_slab, :]
+        x_t = torch.cat([prim_slab_x_t, ads_x_t], dim=1)  # (B*mult, n_prim_slab+M, 3)
         q = q + self.x_to_q_trans(x_t)
 
         # Add noisy lattice (l_t is (B*mult, 6): a, b, c, alpha, beta, gamma)
@@ -210,9 +250,9 @@ class AtomAttentionEncoder(Module):
         q = q + rearrange(sf_embed, "b d -> b 1 d")
 
         # Pass through transformer (joint attention over all atoms)
-        q = self.atom_encoder(q, t, joint_mask)  # (B*mult, N+M, atom_s)
+        q = self.atom_encoder(q, t, joint_mask)  # (B*mult, n_prim_slab+M, atom_s)
 
-        return q, N, M
+        return q, n_prim_slab, M
 
 
 class AtomAttentionDecoder(Module):

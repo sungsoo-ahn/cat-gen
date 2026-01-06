@@ -216,6 +216,21 @@ class LMDBDataModule(pl.LightningDataModule):
         use_pyg: bool = False,
     ):
         super().__init__()
+
+        # Validate required configs
+        if batch_size is None:
+            raise ValueError("batch_size config is required (expected DictConfig with train/val/test keys)")
+        if num_workers is None:
+            raise ValueError("num_workers config is required (expected DictConfig with train/val/test keys)")
+
+        # Validate batch_size has required keys
+        required_keys = ["train"]
+        for key in required_keys:
+            if not hasattr(batch_size, key):
+                raise ValueError(f"batch_size config missing required key: {key}")
+            if not hasattr(num_workers, key):
+                raise ValueError(f"num_workers config missing required key: {key}")
+
         self.train_lmdb_path = train_lmdb_path
         self.val_lmdb_path = val_lmdb_path
         self.test_lmdb_path = test_lmdb_path
@@ -260,41 +275,58 @@ class LMDBDataModule(pl.LightningDataModule):
         else:
             return collate_fn_with_dynamic_padding
 
-    def train_dataloader(self, shuffle: bool = True) -> DataLoader:
+    def _create_dataloader(
+        self,
+        dataset: Optional[Dataset],
+        batch_size: int,
+        num_workers: int,
+        shuffle: bool = False,
+    ) -> Optional[DataLoader]:
+        """Create a DataLoader with common configuration.
+
+        Args:
+            dataset: The dataset to load from (can be None)
+            batch_size: Batch size for the DataLoader
+            num_workers: Number of worker processes
+            shuffle: Whether to shuffle the data
+
+        Returns:
+            DataLoader if dataset is not None, otherwise None
+        """
+        if dataset is None:
+            return None
         return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size.train,
+            dataset,
+            batch_size=batch_size,
             shuffle=shuffle,
-            num_workers=self.num_workers.train,
+            num_workers=num_workers,
             collate_fn=self._get_collate_fn(),
             worker_init_fn=worker_init_fn,
             pin_memory=True,
+        )
+
+    def train_dataloader(self, shuffle: bool = True) -> DataLoader:
+        return self._create_dataloader(
+            dataset=self.train_dataset,
+            batch_size=self.batch_size.train,
+            num_workers=self.num_workers.train,
+            shuffle=shuffle,
         )
 
     def val_dataloader(self) -> Optional[DataLoader]:
-        if self.val_dataset is None:
-            return None
-        return DataLoader(
-            self.val_dataset,
+        return self._create_dataloader(
+            dataset=self.val_dataset,
             batch_size=self.batch_size.val,
-            shuffle=False,
             num_workers=self.num_workers.val,
-            collate_fn=self._get_collate_fn(),
-            worker_init_fn=worker_init_fn,
-            pin_memory=True,
+            shuffle=False,
         )
 
     def test_dataloader(self) -> Optional[DataLoader]:
-        if self.test_dataset is None:
-            return None
-        return DataLoader(
-            self.test_dataset,
+        return self._create_dataloader(
+            dataset=self.test_dataset,
             batch_size=self.batch_size.test,
-            shuffle=False,
             num_workers=self.num_workers.test,
-            collate_fn=self._get_collate_fn(),
-            worker_init_fn=worker_init_fn,
-            pin_memory=True,
+            shuffle=False,
         )
 
     def __repr__(self) -> str:

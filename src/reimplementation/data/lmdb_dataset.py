@@ -10,13 +10,14 @@ LMDB format:
     "n_vac": int,
     "ads_atomic_numbers": numpy array (int),
     "ads_pos": numpy array (float),
-    "ref_energy": float (optional)
+    "ref_energy": float (optional, defaults to NaN if missing)
 }
 """
 
 import pickle
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+import math
 
 import lmdb
 import numpy as np
@@ -27,6 +28,9 @@ from tqdm import tqdm
 from pymatgen.core import Lattice
 
 from src.reimplementation.data.pad import pad_to_max
+
+# Default value for missing reference energy (NaN allows downstream detection)
+MISSING_REF_ENERGY = float("nan")
 
 
 def cell_to_lattice_params(cell: np.ndarray) -> np.ndarray:
@@ -208,9 +212,9 @@ def collate_fn_with_dynamic_padding(
         )
         n_slabs.append(sample["n_slab"])
         n_vacs.append(sample["n_vac"])
-        # Extract ref_energy if available, otherwise use 0.0
-        ref_energy = sample.get("ref_energy", None)
-        ref_energies.append(ref_energy)
+        # Extract ref_energy if available, otherwise use NaN (allows downstream detection)
+        ref_energy = sample.get("ref_energy")
+        ref_energies.append(ref_energy if ref_energy is not None else MISSING_REF_ENERGY)
 
     # Compute scaling_factor = (n_vac + n_slab) / n_slab for each sample
     scaling_factors = []
@@ -224,9 +228,11 @@ def collate_fn_with_dynamic_padding(
     prim_slab_positions, _ = pad_to_max(prim_slab_positions_list, value=0.0)
 
     # Handle adsorbate (may have empty tensors)
-    # Ensure at least 1 dimension for adsorbate
+    # Ensure at least 1 dimension for adsorbate (required for tensor operations)
     if all(len(t) == 0 for t in adsorbate_numbers_list):
-        # All empty - create dummy tensor with size 1
+        # All samples have no adsorbate atoms - create dummy tensor with size 1
+        # The mask will be all False, so these dummy values won't affect model predictions
+        # This is necessary because PyTorch cannot create 0-dimension tensors for batching
         batch_size = len(batch)
         adsorbate_atomic_numbers = torch.full(
             (batch_size, 1), pad_value, dtype=torch.long
@@ -380,8 +386,8 @@ class LMDBCachedDatasetWithTransform(LMDBCachedDataset):
             # Number of atoms for batching
             num_prim_slab_atoms=len(primitive_slab.numbers),  # scalar
             num_adsorbate_atoms=len(raw_data["ads_atomic_numbers"]),  # scalar
-            # Reference energy (optional, default to 0.0 if not present)
-            ref_energy=raw_data.get("ref_energy", None),  # scalar
+            # Reference energy (optional, defaults to NaN if not present)
+            ref_energy=raw_data.get("ref_energy") if raw_data.get("ref_energy") is not None else MISSING_REF_ENERGY,  # scalar
         )
 
         return data
@@ -427,7 +433,10 @@ def collate_pyg_with_dynamic_padding(
         prim_slab_mask = torch.ones(prim_slab_atomic_numbers.shape, dtype=torch.bool)
 
     # Handle adsorbate (may have empty tensors)
+    # Ensure at least 1 dimension for adsorbate (required for tensor operations)
     if all(len(t) == 0 for t in adsorbate_nums_list):
+        # All samples have no adsorbate atoms - create dummy tensor with size 1
+        # The mask will be all False, so these dummy values won't affect model predictions
         adsorbate_atomic_numbers = torch.full(
             (batch_size, 1), pad_value, dtype=torch.long
         )

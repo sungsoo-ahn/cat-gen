@@ -4,7 +4,8 @@ import json
 import time
 import random
 import multiprocessing as mp
-from typing import Any, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Optional
 
 import torch
 import numpy as np
@@ -17,6 +18,134 @@ from pebble import ProcessPool
 from concurrent.futures import TimeoutError as PebbleTimeoutError
 from pymatgen.analysis.structure_matcher import StructureMatcher
 from tqdm import tqdm
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+@contextmanager
+def handle_cuda_oom(action_name: str = "operation"):
+    """Context manager to handle CUDA out-of-memory errors gracefully.
+
+    Usage:
+        with handle_cuda_oom("sampling"):
+            result = model(batch)
+        # If OOM occurs, logs warning and clears cache
+
+    Args:
+        action_name: Description of the operation for logging.
+
+    Yields:
+        None
+
+    Raises:
+        RuntimeError: Re-raises if the error is not OOM-related.
+    """
+    try:
+        yield
+    except RuntimeError as e:
+        # Check for CUDA OOM using torch's built-in method when available
+        is_oom = False
+        if hasattr(torch.cuda, 'OutOfMemoryError') and isinstance(e, torch.cuda.OutOfMemoryError):
+            is_oom = True
+        elif "out of memory" in str(e).lower() or "CUDA out of memory" in str(e):
+            is_oom = True
+
+        if is_oom:
+            rank_zero_info(f"| WARNING: CUDA out of memory during {action_name}. Clearing cache.")
+            torch.cuda.empty_cache()
+            gc.collect()
+        else:
+            raise
+
+
+def _expand_tensor_for_multiplicity(
+    tensor: Tensor,
+    multiplicity: int,
+    target_size: Optional[int] = None,
+    pad_value: float = 0.0,
+) -> Tensor:
+    """Expand a tensor for multiplicity and optionally resize to target_size.
+
+    Args:
+        tensor: Input tensor of shape (B, N, ...) or (B, N)
+        multiplicity: Number of times to repeat each sample
+        target_size: Optional target size for dimension 1. If provided, pads or slices.
+        pad_value: Value to use for padding (default: 0.0)
+
+    Returns:
+        Expanded tensor of shape (B*multiplicity, target_size or N, ...)
+    """
+    if target_size is not None:
+        current_size = tensor.shape[1]
+        if target_size > current_size:
+            # Pad
+            pad_shape = list(tensor.shape)
+            pad_shape[1] = target_size - current_size
+            padding = torch.full(pad_shape, pad_value, device=tensor.device, dtype=tensor.dtype)
+            tensor = torch.cat([tensor, padding], dim=1)
+        elif target_size < current_size:
+            # Slice
+            tensor = tensor[:, :target_size]
+
+    return tensor.repeat_interleave(multiplicity, dim=0)
+
+
+def _run_parallel_tasks(
+    tasks: list,
+    task_fn: Callable,
+    num_workers: int,
+    timeout_seconds: float,
+    task_name: str,
+    default_result: Any,
+) -> list:
+    """Execute tasks in parallel using ProcessPool with consistent error handling.
+
+    Args:
+        tasks: List of task arguments (each element is passed to task_fn)
+        task_fn: Function to execute for each task
+        num_workers: Number of parallel workers
+        timeout_seconds: Timeout per task in seconds
+        task_name: Name for logging (e.g., "Prim RMSD matching")
+        default_result: Result to use when a task fails or times out
+
+    Returns:
+        List of results, one per task
+    """
+    if not tasks:
+        return []
+
+    rank_zero_info(f"| Computing {task_name} for {len(tasks)} structures (workers={num_workers})...")
+    results = []
+
+    with ProcessPool(max_workers=num_workers, context=mp.get_context("spawn")) as pool:
+        future_map = {
+            pool.schedule(task_fn, args=(task,)): task
+            for task in tasks
+        }
+
+        for future in tqdm(
+            future_map,
+            desc=task_name,
+            unit="struct",
+            total=len(tasks),
+            leave=False,
+        ):
+            try:
+                result = future.result(timeout=timeout_seconds)
+                results.append(result)
+            except PebbleTimeoutError:
+                future.cancel()
+                rank_zero_info(f"| WARNING: A {task_name} task timed out. Skipping.")
+                results.append(default_result)
+            except Exception as e:
+                future.cancel()
+                rank_zero_info(f"| WARNING: A {task_name} task failed: {e}")
+                results.append(default_result)
+
+    rank_zero_info(f"| {task_name} computation completed.")
+    return results
 
 from src.reimplementation.data.prior import CatPriorSampler
 from src.reimplementation.models.loss.validation import (
@@ -95,21 +224,26 @@ class EffCatModule(LightningModule):
         
         # Load and cache histogram JSON file when dng=True
         if self.dng:
-            histogram_path = self.validation_args.get("n_prim_slab_atoms_histogram_path", "primitive_atom_distribution.json")
-            # Handle relative paths relative to project root
-            if not os.path.isabs(histogram_path):
-                # Find project root path (relative to current file)
-                project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-                histogram_path = os.path.join(project_root, histogram_path)
-            
-            with open(histogram_path, 'r') as f:
-                histogram_data = json.load(f)
-            
-            # JSON structure: {"prim_slab_num_atoms_hist": [0.0, 0.0115, ...]}
-            self.n_prim_slab_atoms_hist = histogram_data["prim_slab_num_atoms_hist"]
-            # Index = number of atoms, value = probability
-            # max_n_prim_slab_atoms is histogram length - 1 (since indices start from 0)
-            self.max_n_prim_slab_atoms = len(self.n_prim_slab_atoms_hist) - 1
+            histogram_path = self.validation_args.get("n_prim_slab_atoms_histogram_path")
+            if histogram_path is not None:
+                # Handle relative paths relative to project root
+                if not os.path.isabs(histogram_path):
+                    # Find project root path (relative to current file)
+                    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+                    histogram_path = os.path.join(project_root, histogram_path)
+
+                with open(histogram_path, 'r') as f:
+                    histogram_data = json.load(f)
+
+                # JSON structure: {"prim_slab_num_atoms_hist": [0.0, 0.0115, ...]}
+                self.n_prim_slab_atoms_hist = histogram_data["prim_slab_num_atoms_hist"]
+                # Index = number of atoms, value = probability
+                # max_n_prim_slab_atoms is histogram length - 1 (since indices start from 0)
+                self.max_n_prim_slab_atoms = len(self.n_prim_slab_atoms_hist) - 1
+            else:
+                # Default: uniform distribution for atoms 1-20
+                self.n_prim_slab_atoms_hist = [0.0] + [1.0/20]*20
+                self.max_n_prim_slab_atoms = 20
 
     def setup(self, stage: str) -> None:
         """Set the model for training, validation and inference."""
@@ -118,6 +252,101 @@ class EffCatModule(LightningModule):
             and torch.cuda.get_device_properties(torch.device("cuda")).major >= 8
         ):
             self.use_kernels = False
+
+    def _prepare_dng_sampling_feats(
+        self,
+        feats: dict[str, Tensor],
+        multiplicity: int,
+    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+        """Prepare features for DNG (dynamic number generation) sampling mode.
+
+        This method samples the number of primitive slab atoms from a histogram,
+        creates dynamic masks, and expands all feature tensors for multiplicity.
+
+        Args:
+            feats: Input feature dictionary
+            multiplicity: Number of samples per input
+
+        Returns:
+            Tuple of (prim_slab_atom_mask, ads_atom_mask, modified_feats)
+        """
+        batch_size = feats["ref_prim_slab_element"].shape[0]
+        original_n = feats["prim_slab_cart_coords"].shape[1]
+
+        # Sample number of atoms from histogram
+        n_atoms_indices = np.arange(len(self.n_prim_slab_atoms_hist))
+        sampled_n_atoms = np.random.choice(
+            n_atoms_indices,
+            size=batch_size * multiplicity,
+            p=self.n_prim_slab_atoms_hist,
+            replace=True
+        ).tolist()
+
+        max_n = max(sampled_n_atoms) if sampled_n_atoms else self.max_n_prim_slab_atoms
+
+        # Create dynamic prim_slab_atom_mask
+        prim_slab_atom_mask = torch.zeros(
+            (batch_size * multiplicity, max_n),
+            dtype=torch.bool,
+            device=self.device
+        )
+        for i, n in enumerate(sampled_n_atoms):
+            prim_slab_atom_mask[i, :n] = True
+
+        # Create prim_slab_atom_to_token
+        feats["prim_slab_atom_to_token"] = torch.eye(
+            max_n, device=self.device
+        ).unsqueeze(0).expand(batch_size * multiplicity, -1, -1)
+
+        # Resize target for prim_slab tensors (only if size changed)
+        target_n = max_n if max_n != original_n else None
+
+        # Define tensor groups with their expansion configs
+        # (key, needs_resize, pad_value)
+        prim_slab_tensors = [
+            ("prim_slab_cart_coords", True, 0.0),
+            ("prim_slab_atom_pad_mask", True, 0),
+            ("ref_prim_slab_element", True, 0),
+            ("prim_slab_token_pad_mask", True, 0),
+        ]
+
+        ads_tensors = [
+            ("ads_atom_to_token", False, 0),
+            ("ads_cart_coords", False, 0.0),
+            ("ads_atom_pad_mask", False, 0),
+            ("ads_token_pad_mask", False, 0),
+            ("ref_ads_element", False, 0),
+            ("ref_ads_pos", False, 0.0),
+            ("bind_ads_atom", False, 0),
+        ]
+
+        global_tensors = [
+            ("lattice", False, 0.0),
+            ("supercell_matrix", False, 0),
+            ("scaling_factor", False, 0.0),
+        ]
+
+        # Expand prim_slab tensors (with optional resize)
+        for key, needs_resize, pad_value in prim_slab_tensors:
+            if key in feats:
+                resize_target = target_n if needs_resize else None
+                feats[key] = _expand_tensor_for_multiplicity(
+                    feats[key], multiplicity, resize_target, pad_value
+                )
+
+        # Expand ads tensors
+        for key, _, pad_value in ads_tensors:
+            if key in feats:
+                feats[key] = feats[key].repeat_interleave(multiplicity, dim=0)
+
+        # Expand global tensors
+        for key, _, _ in global_tensors:
+            if key in feats:
+                feats[key] = feats[key].repeat_interleave(multiplicity, dim=0)
+
+        ads_atom_mask = feats["ads_atom_pad_mask"]
+
+        return prim_slab_atom_mask, ads_atom_mask, feats
     
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Called when checkpoint is loaded. Use this to verify optimizer state."""
@@ -175,110 +404,9 @@ class EffCatModule(LightningModule):
             # Returns sampled structure
             # When dng=True: sample n_prim_slab_atoms from histogram and dynamically create mask
             if self.dng:
-                batch_size = feats["ref_prim_slab_element"].shape[0]
-                original_n = feats["prim_slab_cart_coords"].shape[1]  # Original number of atoms in feats
-                
-                # Sample number of atoms from histogram according to probability
-                # Index of prim_slab_num_atoms_hist = number of atoms, value = probability
-                n_atoms_indices = np.arange(len(self.n_prim_slab_atoms_hist))
-                sampled_n_atoms = np.random.choice(
-                    n_atoms_indices,  # Indices to sample (number of atoms)
-                    size=batch_size * multiplicity_flow_sample,
-                    p=self.n_prim_slab_atoms_hist,  # Probability distribution
-                    replace=True
-                ).tolist()
-                
-                # Determine max_n_prim_slab_atoms
-                max_n = max(sampled_n_atoms) if len(sampled_n_atoms) > 0 else self.max_n_prim_slab_atoms
-                
-                # Dynamically create prim_slab_atom_mask
-                prim_slab_atom_mask = torch.zeros((batch_size * multiplicity_flow_sample, max_n), dtype=torch.bool, device=self.device)
-                for i, n in enumerate(sampled_n_atoms):
-                    prim_slab_atom_mask[i, :n] = True
-                
-                # Also dynamically regenerate prim_slab_atom_to_token
-                prim_slab_atom_to_token = torch.eye(max_n, device=self.device).unsqueeze(0).expand(batch_size * multiplicity_flow_sample, -1, -1)
-                feats["prim_slab_atom_to_token"] = prim_slab_atom_to_token
-                
-                # Adjust feats to match max_n: pad or slice prim_slab-related tensors
-                # If max_n > original_n, pad with zeros/padding values
-                # If max_n < original_n, slice to max_n
-                if max_n != original_n:
-                    # Adjust prim_slab_cart_coords
-                    if max_n > original_n:
-                        # Pad with zeros
-                        padding = torch.zeros((batch_size, max_n - original_n, 3), device=feats["prim_slab_cart_coords"].device, dtype=feats["prim_slab_cart_coords"].dtype)
-                        feats["prim_slab_cart_coords"] = torch.cat([feats["prim_slab_cart_coords"], padding], dim=1)
-                    else:
-                        # Slice to max_n
-                        feats["prim_slab_cart_coords"] = feats["prim_slab_cart_coords"][:, :max_n, :]
-                    
-                    # Adjust prim_slab_atom_pad_mask
-                    if max_n > original_n:
-                        # Pad with False (padding)
-                        padding = torch.zeros((batch_size, max_n - original_n), device=feats["prim_slab_atom_pad_mask"].device, dtype=feats["prim_slab_atom_pad_mask"].dtype)
-                        feats["prim_slab_atom_pad_mask"] = torch.cat([feats["prim_slab_atom_pad_mask"], padding], dim=1)
-                    else:
-                        # Slice to max_n
-                        feats["prim_slab_atom_pad_mask"] = feats["prim_slab_atom_pad_mask"][:, :max_n]
-                    
-                    # Adjust ref_prim_slab_element
-                    if max_n > original_n:
-                        # Pad with 0 (padding element)
-                        padding = torch.zeros((batch_size, max_n - original_n), device=feats["ref_prim_slab_element"].device, dtype=feats["ref_prim_slab_element"].dtype)
-                        feats["ref_prim_slab_element"] = torch.cat([feats["ref_prim_slab_element"], padding], dim=1)
-                    else:
-                        # Slice to max_n
-                        feats["ref_prim_slab_element"] = feats["ref_prim_slab_element"][:, :max_n]
-                    
-                    # Adjust prim_slab_token_pad_mask (used in TokenTransformer)
-                    if "prim_slab_token_pad_mask" in feats:
-                        if max_n > original_n:
-                            # Pad with 0 (padding)
-                            padding = torch.zeros((batch_size, max_n - original_n), device=feats["prim_slab_token_pad_mask"].device, dtype=feats["prim_slab_token_pad_mask"].dtype)
-                            feats["prim_slab_token_pad_mask"] = torch.cat([feats["prim_slab_token_pad_mask"], padding], dim=1)
-                        else:
-                            # Slice to max_n
-                            feats["prim_slab_token_pad_mask"] = feats["prim_slab_token_pad_mask"][:, :max_n]
-                
-                # Expand all ads-related tensors in feats to match prim_slab batch size (batch_size * multiplicity_flow_sample)
-                # This is needed because prim_slab tensors are already expanded
-                if "ads_atom_to_token" in feats:
-                    feats["ads_atom_to_token"] = feats["ads_atom_to_token"].repeat_interleave(multiplicity_flow_sample, 0)
-                if "ads_cart_coords" in feats:
-                    feats["ads_cart_coords"] = feats["ads_cart_coords"].repeat_interleave(multiplicity_flow_sample, 0)
-                if "ads_atom_pad_mask" in feats:
-                    feats["ads_atom_pad_mask"] = feats["ads_atom_pad_mask"].repeat_interleave(multiplicity_flow_sample, 0)
-                if "ads_token_pad_mask" in feats:
-                    feats["ads_token_pad_mask"] = feats["ads_token_pad_mask"].repeat_interleave(multiplicity_flow_sample, 0)
-                if "ref_ads_element" in feats:
-                    feats["ref_ads_element"] = feats["ref_ads_element"].repeat_interleave(multiplicity_flow_sample, 0)
-                if "ref_ads_pos" in feats:
-                    feats["ref_ads_pos"] = feats["ref_ads_pos"].repeat_interleave(multiplicity_flow_sample, 0)
-                if "bind_ads_atom" in feats:
-                    feats["bind_ads_atom"] = feats["bind_ads_atom"].repeat_interleave(multiplicity_flow_sample, 0)
-                
-                # Expand prim_slab-related tensors in feats that haven't been expanded yet
-                # (prim_slab_atom_to_token is already expanded above, but other tensors need expansion)
-                if "prim_slab_cart_coords" in feats:
-                    feats["prim_slab_cart_coords"] = feats["prim_slab_cart_coords"].repeat_interleave(multiplicity_flow_sample, 0)
-                if "prim_slab_atom_pad_mask" in feats:
-                    feats["prim_slab_atom_pad_mask"] = feats["prim_slab_atom_pad_mask"].repeat_interleave(multiplicity_flow_sample, 0)
-                if "prim_slab_token_pad_mask" in feats:
-                    feats["prim_slab_token_pad_mask"] = feats["prim_slab_token_pad_mask"].repeat_interleave(multiplicity_flow_sample, 0)
-                if "ref_prim_slab_element" in feats:
-                    feats["ref_prim_slab_element"] = feats["ref_prim_slab_element"].repeat_interleave(multiplicity_flow_sample, 0)
-                
-                # Expand other global tensors if they exist
-                if "lattice" in feats:
-                    feats["lattice"] = feats["lattice"].repeat_interleave(multiplicity_flow_sample, 0)
-                if "supercell_matrix" in feats:
-                    feats["supercell_matrix"] = feats["supercell_matrix"].repeat_interleave(multiplicity_flow_sample, 0)
-                if "scaling_factor" in feats:
-                    feats["scaling_factor"] = feats["scaling_factor"].repeat_interleave(multiplicity_flow_sample, 0)
-                
-                # Expand ads_atom_mask to match prim_slab_atom_mask batch size (batch_size * multiplicity_flow_sample)
-                ads_atom_mask = feats["ads_atom_pad_mask"]
+                prim_slab_atom_mask, ads_atom_mask, feats = self._prepare_dng_sampling_feats(
+                    feats, multiplicity_flow_sample
+                )
             else:
                 prim_slab_atom_mask = feats["prim_slab_atom_pad_mask"]
                 ads_atom_mask = feats["ads_atom_pad_mask"]
@@ -411,21 +539,19 @@ class EffCatModule(LightningModule):
 
         n_samples = self.validation_args["flow_samples"]
 
-        try:
+        # Use context manager for cleaner OOM handling
+        out = None
+        with handle_cuda_oom("validation sampling"):
             out = self(
                 batch,
                 num_sampling_steps=self.validation_args["sampling_steps"],
                 center_during_sampling=False,
                 multiplicity_flow_sample=n_samples,
             )
-        except RuntimeError as e:  # catch out of memory exceptions
-            if "out of memory" in str(e):
-                rank_zero_info("| WARNING: ran out of memory, skipping batch")
-                torch.cuda.empty_cache()
-                gc.collect()
-                return
-            else:
-                raise e
+
+        if out is None:
+            # OOM occurred, skip this batch
+            return
 
         # Aggregate outputs
         return_dict = {
@@ -621,40 +747,14 @@ class EffCatModule(LightningModule):
             # Execute RMSD tasks only when dng=False (excluded when dng=True)
             if not self.dng:
                 # Execute prim RMSD tasks in parallel
-                rank_zero_info(f"| Computing prim RMSD for {len(prim_rmsd_tasks)} structures (workers={num_workers})...")
-                prim_rmsd_results_per_item = []
-                with ProcessPool(
-                    max_workers=num_workers, context=mp.get_context("spawn")
-                ) as pool:
-                    future_map = {
-                        pool.schedule(find_best_match_rmsd_prim, args=(task,)): task
-                        for task in prim_rmsd_tasks
-                    }
-
-                    for future in tqdm(
-                        future_map, 
-                        desc="Prim RMSD matching", 
-                        unit="struct",
-                        total=len(prim_rmsd_tasks),
-                        leave=False,
-                    ):
-                        try:
-                            result = future.result(timeout=timeout_seconds)
-                            prim_rmsd_results_per_item.append(result)
-                        except PebbleTimeoutError:
-                            future.cancel()
-                            rank_zero_info(
-                                f"| WARNING: A prim RMSD matching task timed out. Skipping."
-                            )
-                            prim_rmsd_results_per_item.append([None] * n_samples)
-                        except Exception as e:
-                            future.cancel()
-                            rank_zero_info(
-                                f"| WARNING: A prim RMSD task failed with an exception: {e}"
-                            )
-                            prim_rmsd_results_per_item.append([None] * n_samples)
-                
-                rank_zero_info(f"| Prim RMSD computation completed.")
+                prim_rmsd_results_per_item = _run_parallel_tasks(
+                    tasks=prim_rmsd_tasks,
+                    task_fn=find_best_match_rmsd_prim,
+                    num_workers=num_workers,
+                    timeout_seconds=timeout_seconds,
+                    task_name="Prim RMSD matching",
+                    default_result=[None] * n_samples,
+                )
 
                 # Compute prim match rate and RMSD (primitive slab)
                 for result_list in prim_rmsd_results_per_item:
@@ -666,40 +766,14 @@ class EffCatModule(LightningModule):
                         self.val_prim_match_rate.update(0.0)
 
                 # Execute slab RMSD tasks in parallel
-                rank_zero_info(f"| Computing slab RMSD for {len(slab_rmsd_tasks)} structures (workers={num_workers})...")
-                slab_rmsd_results_per_item = []
-                with ProcessPool(
-                    max_workers=num_workers, context=mp.get_context("spawn")
-                ) as pool:
-                    future_map = {
-                        pool.schedule(find_best_match_rmsd_slab, args=(task,)): task
-                        for task in slab_rmsd_tasks
-                    }
-
-                    for future in tqdm(
-                        future_map, 
-                        desc="Slab RMSD matching", 
-                        unit="struct",
-                        total=len(slab_rmsd_tasks),
-                        leave=False,
-                    ):
-                        try:
-                            result = future.result(timeout=timeout_seconds)
-                            slab_rmsd_results_per_item.append(result)
-                        except PebbleTimeoutError:
-                            future.cancel()
-                            rank_zero_info(
-                                f"| WARNING: A slab RMSD task timed out. Skipping."
-                            )
-                            slab_rmsd_results_per_item.append([None] * n_samples)
-                        except Exception as e:
-                            future.cancel()
-                            rank_zero_info(
-                                f"| WARNING: A slab RMSD task failed with an exception: {e}"
-                            )
-                            slab_rmsd_results_per_item.append([None] * n_samples)
-                
-                rank_zero_info(f"| Slab RMSD computation completed.")
+                slab_rmsd_results_per_item = _run_parallel_tasks(
+                    tasks=slab_rmsd_tasks,
+                    task_fn=find_best_match_rmsd_slab,
+                    num_workers=num_workers,
+                    timeout_seconds=timeout_seconds,
+                    task_name="Slab RMSD matching",
+                    default_result=[None] * n_samples,
+                )
 
                 # Compute slab match rate and RMSD
                 for result_list in slab_rmsd_results_per_item:
@@ -711,40 +785,14 @@ class EffCatModule(LightningModule):
                         self.val_slab_match_rate.update(0.0)
 
             # Execute prim structural validity tasks in parallel (always computed)
-            rank_zero_info(f"| Computing prim structural validity for {len(prim_validity_tasks)} structures (workers={num_workers})...")
-            prim_validity_results_per_item = []
-            with ProcessPool(
-                max_workers=num_workers, context=mp.get_context("spawn")
-            ) as pool:
-                future_map = {
-                    pool.schedule(compute_prim_structural_validity_single, args=(task,)): task
-                    for task in prim_validity_tasks
-                }
-
-                for future in tqdm(
-                    future_map, 
-                    desc="Prim structural validity", 
-                    unit="struct",
-                    total=len(prim_validity_tasks),
-                    leave=False,
-                ):
-                    try:
-                        result = future.result(timeout=timeout_seconds)
-                        prim_validity_results_per_item.append(result)
-                    except PebbleTimeoutError:
-                        future.cancel()
-                        rank_zero_info(
-                            f"| WARNING: A prim structural validity task timed out. Skipping."
-                        )
-                        prim_validity_results_per_item.append([False] * n_samples)
-                    except Exception as e:
-                        future.cancel()
-                        rank_zero_info(
-                            f"| WARNING: A prim validity task failed with an exception: {e}"
-                        )
-                        prim_validity_results_per_item.append([False] * n_samples)
-            
-            rank_zero_info(f"| Prim structural validity computation completed.")
+            prim_validity_results_per_item = _run_parallel_tasks(
+                tasks=prim_validity_tasks,
+                task_fn=compute_prim_structural_validity_single,
+                num_workers=num_workers,
+                timeout_seconds=timeout_seconds,
+                task_name="Prim structural validity",
+                default_result=[False] * n_samples,
+            )
 
             # Compute prim structural validity rate (always computed)
             # Count as valid if at least one sample is valid (consistent with prim/slab RMSD)
@@ -755,40 +803,14 @@ class EffCatModule(LightningModule):
                     self.val_prim_structural_validity.update(0.0)
 
             # Execute slab structural validity tasks in parallel (always computed)
-            rank_zero_info(f"| Computing slab structural validity for {len(slab_validity_tasks)} structures (workers={num_workers})...")
-            slab_validity_results_per_item = []
-            with ProcessPool(
-                max_workers=num_workers, context=mp.get_context("spawn")
-            ) as pool:
-                future_map = {
-                    pool.schedule(compute_structural_validity_single, args=(task,)): task
-                    for task in slab_validity_tasks
-                }
-
-                for future in tqdm(
-                    future_map, 
-                    desc="Slab structural validity", 
-                    unit="struct",
-                    total=len(slab_validity_tasks),
-                    leave=False,
-                ):
-                    try:
-                        result = future.result(timeout=timeout_seconds)
-                        slab_validity_results_per_item.append(result)
-                    except PebbleTimeoutError:
-                        future.cancel()
-                        rank_zero_info(
-                            f"| WARNING: A slab structural validity task timed out. Skipping."
-                        )
-                        slab_validity_results_per_item.append([False] * n_samples)
-                    except Exception as e:
-                        future.cancel()
-                        rank_zero_info(
-                            f"| WARNING: A slab validity task failed with an exception: {e}"
-                        )
-                        slab_validity_results_per_item.append([False] * n_samples)
-            
-            rank_zero_info(f"| Slab structural validity computation completed.")
+            slab_validity_results_per_item = _run_parallel_tasks(
+                tasks=slab_validity_tasks,
+                task_fn=compute_structural_validity_single,
+                num_workers=num_workers,
+                timeout_seconds=timeout_seconds,
+                task_name="Slab structural validity",
+                default_result=[False] * n_samples,
+            )
 
             # Compute slab structural validity rate (always computed)
             # Count as valid if at least one sample is valid (consistent with prim/slab RMSD)
@@ -952,7 +974,9 @@ class EffCatModule(LightningModule):
     def predict_step(self, batch: dict[str, Tensor], batch_idx: int) -> dict[str, Any]:
         num_samples = self.predict_args.get("num_samples", 1)
 
-        try:
+        # Use context manager for cleaner OOM handling
+        out = None
+        with handle_cuda_oom(f"prediction on batch {batch_idx}"):
             out = self(
                 batch,
                 num_sampling_steps=self.predict_args["sampling_steps"],
@@ -961,47 +985,40 @@ class EffCatModule(LightningModule):
                 multiplicity_flow_sample=num_samples,
             )
 
-            prediction_output = {
-                "exception": False,
-                "generated_prim_slab_coords": out["sampled_prim_slab_coords"],
-                "generated_ads_coords": out["sampled_ads_coords"],
-                "generated_lattices": out["sampled_lattice"],
-                "generated_supercell_matrices": out["sampled_supercell_matrix"],
-                "generated_scaling_factors": out["sampled_scaling_factor"],
-                "prim_slab_atom_types": batch["ref_prim_slab_element"],
-                "ads_atom_types": batch["ref_ads_element"],
-                "prim_slab_atom_mask": batch["prim_slab_atom_pad_mask"],
-                "ads_atom_mask": batch["ads_atom_pad_mask"],
-                "tags": batch.get("tags", None),  # TODO: May change feature name
-            }
+        if out is None:
+            # OOM occurred
+            return {"exception": True}
 
-            if "prim_slab_cart_coords" in batch:
-                prediction_output["true_prim_slab_coords"] = batch["prim_slab_cart_coords"]
+        prediction_output = {
+            "exception": False,
+            "generated_prim_slab_coords": out["sampled_prim_slab_coords"],
+            "generated_ads_coords": out["sampled_ads_coords"],
+            "generated_lattices": out["sampled_lattice"],
+            "generated_supercell_matrices": out["sampled_supercell_matrix"],
+            "generated_scaling_factors": out["sampled_scaling_factor"],
+            "prim_slab_atom_types": batch["ref_prim_slab_element"],
+            "ads_atom_types": batch["ref_ads_element"],
+            "prim_slab_atom_mask": batch["prim_slab_atom_pad_mask"],
+            "ads_atom_mask": batch["ads_atom_pad_mask"],
+            "tags": batch.get("tags", None),  # TODO: May change feature name
+        }
 
-            if "ads_cart_coords" in batch:
-                prediction_output["true_ads_coords"] = batch["ads_cart_coords"]
+        if "prim_slab_cart_coords" in batch:
+            prediction_output["true_prim_slab_coords"] = batch["prim_slab_cart_coords"]
 
-            if "lattice" in batch:
-                prediction_output["true_lattices"] = batch["lattice"]
+        if "ads_cart_coords" in batch:
+            prediction_output["true_ads_coords"] = batch["ads_cart_coords"]
 
-            if "supercell_matrix" in batch:
-                prediction_output["true_supercells"] = batch["supercell_matrix"]
+        if "lattice" in batch:
+            prediction_output["true_lattices"] = batch["lattice"]
 
-            if "scaling_factor" in batch:
-                prediction_output["true_scaling_factors"] = batch["scaling_factor"]
+        if "supercell_matrix" in batch:
+            prediction_output["true_supercells"] = batch["supercell_matrix"]
 
-            return prediction_output
+        if "scaling_factor" in batch:
+            prediction_output["true_scaling_factors"] = batch["scaling_factor"]
 
-        except RuntimeError as e:
-            if "out of memory" in str(e):
-                rank_zero_info(
-                    f"| WARNING: Ran out of memory during prediction on batch {batch_idx}. Skipping batch."
-                )
-                torch.cuda.empty_cache()
-                gc.collect()
-                return {"exception": True}
-            else:
-                raise e
+        return prediction_output
 
     def configure_optimizers(self):
         # TODO: Add af3 scheduler
@@ -1021,6 +1038,4 @@ class EffCatModule(LightningModule):
             List of callbacks to be used in the model.
 
         """
-        return []
-
         return []

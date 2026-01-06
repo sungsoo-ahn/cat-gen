@@ -95,21 +95,26 @@ class EffCatModule(LightningModule):
         
         # Load and cache histogram JSON file when dng=True
         if self.dng:
-            histogram_path = self.validation_args.get("n_prim_slab_atoms_histogram_path", "primitive_atom_distribution.json")
-            # Handle relative paths relative to project root
-            if not os.path.isabs(histogram_path):
-                # Find project root path (relative to current file)
-                project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-                histogram_path = os.path.join(project_root, histogram_path)
-            
-            with open(histogram_path, 'r') as f:
-                histogram_data = json.load(f)
-            
-            # JSON structure: {"prim_slab_num_atoms_hist": [0.0, 0.0115, ...]}
-            self.n_prim_slab_atoms_hist = histogram_data["prim_slab_num_atoms_hist"]
-            # Index = number of atoms, value = probability
-            # max_n_prim_slab_atoms is histogram length - 1 (since indices start from 0)
-            self.max_n_prim_slab_atoms = len(self.n_prim_slab_atoms_hist) - 1
+            histogram_path = self.validation_args.get("n_prim_slab_atoms_histogram_path")
+            if histogram_path is not None:
+                # Handle relative paths relative to project root
+                if not os.path.isabs(histogram_path):
+                    # Find project root path (relative to current file)
+                    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+                    histogram_path = os.path.join(project_root, histogram_path)
+
+                with open(histogram_path, 'r') as f:
+                    histogram_data = json.load(f)
+
+                # JSON structure: {"prim_slab_num_atoms_hist": [0.0, 0.0115, ...]}
+                self.n_prim_slab_atoms_hist = histogram_data["prim_slab_num_atoms_hist"]
+                # Index = number of atoms, value = probability
+                # max_n_prim_slab_atoms is histogram length - 1 (since indices start from 0)
+                self.max_n_prim_slab_atoms = len(self.n_prim_slab_atoms_hist) - 1
+            else:
+                # Default: uniform distribution for atoms 1-20
+                self.n_prim_slab_atoms_hist = [0.0] + [1.0/20]*20
+                self.max_n_prim_slab_atoms = 20
 
     def setup(self, stage: str) -> None:
         """Set the model for training, validation and inference."""

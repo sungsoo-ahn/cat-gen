@@ -392,6 +392,7 @@ dependencies = [
     { name = "e3nn" },
     { name = "einops" },
     { name = "fairchem-core" },
+    { name = "fairchem-data-oc" },
     { name = "gdown" },
     { name = "h5py" },
     { name = "jsonlines" },
@@ -439,6 +440,7 @@ requires-dist = [
     { name = "e3nn", specifier = ">=0.5.0" },
     { name = "einops", specifier = ">=0.6.0" },
     { name = "fairchem-core", specifier = ">=1.0.0" },
+    { name = "fairchem-data-oc", specifier = ">=1.0.2" },
     { name = "gdown", specifier = ">=5.2.0" },
     { name = "h5py", specifier = ">=3.9.0" },
     { name = "jsonlines", specifier = ">=3.1.0" },
@@ -1219,6 +1221,25 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/10/cf/0c6e0fa2a00c1747b9e06aa280370a93dcc4bdc2cc89b7eb17d1a0e7dcc8/fairchem_core-2.13.0.tar.gz", hash = "sha256:b8ccefcdef4ea8fc13fee63a964a5b9e0663dc1eccd5d131bb0887514f2bbb21", size = 248523, upload-time = "2025-12-11T18:25:28.082Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ff/81/454aa513417936c14d3a0b53e543ca6ec7255c0e64e947f9652f95a0846f/fairchem_core-2.13.0-py3-none-any.whl", hash = "sha256:d804955a9c6d8600373214bb6b361848d3579ccf7eea1e62e2a4827e4cbd3371", size = 353553, upload-time = "2025-12-11T18:25:26.706Z" },
+]
+
+[[package]]
+name = "fairchem-data-oc"
+version = "1.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ase" },
+    { name = "matplotlib" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pymatgen" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.16.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6f/e4/3bb30e0e2d71296e4a37afa721ee802a3260b1e75eb626474cbdf5dce1db/fairchem_data_oc-1.0.2.tar.gz", hash = "sha256:c5184241f94f5d0714a2bc79cc255d44bb85317f8be21d7a30e972711e525558", size = 177819, upload-time = "2025-08-22T21:10:35.612Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/e0/237f9777e6de5a9a2d97c1870225207fdaaac6826df5e4739a86bc945406/fairchem_data_oc-1.0.2-py2.py3-none-any.whl", hash = "sha256:04e1ce28eae1c71eecfd1f5131929ad19f9bf3e10ac1832ffcc67ef85ab78187", size = 187281, upload-time = "2025-08-22T21:10:34.188Z" },
 ]
 
 [[package]]

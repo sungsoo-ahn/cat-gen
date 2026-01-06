@@ -6,7 +6,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def modulate(x, shift, scale):
+def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Apply adaptive layer normalization modulation.
+
+    Modulates input x using learned shift and scale parameters:
+        output = x * (1 + scale) + shift
+
+    Args:
+        x: Input tensor of shape (B, N, D)
+        shift: Shift parameter of shape (B, D)
+        scale: Scale parameter of shape (B, D)
+
+    Returns:
+        Modulated tensor of shape (B, N, D)
+    """
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
@@ -87,7 +100,7 @@ class PositionalEmbedder(nn.Module):
         return pos_emb
 
 
-class Mlp(nn.Module):
+class MLP(nn.Module):
     """MLP as used in Vision Transformer, MLP-Mixer and related networks."""
 
     def __init__(
@@ -148,11 +161,15 @@ class DiTBlock(nn.Module):
         )
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.mlp = Mlp(
+
+        def _approx_gelu() -> nn.Module:
+            """Create GELU activation with tanh approximation (faster than exact)."""
+            return nn.GELU(approximate="tanh")
+
+        self.mlp = MLP(
             in_features=dim,
             hidden_features=mlp_hidden_dim,
-            act_layer=approx_gelu,
+            act_layer=_approx_gelu,
             drop=dropout,
         )
         self.adaLN_modulation = nn.Sequential(
