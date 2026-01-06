@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """Convert OC20 IS2RE LMDB data to MinCatFlow format.
 
-MinCatFlow uses a custom LMDB format where catalyst structures are decomposed into:
-- primitive_slab: ASE Atoms (primitive unit cell)
-- supercell_matrix: transformation to reconstruct supercell
-- adsorbate positions and types
+MinCatFlow format decomposes catalyst structures into:
+- primitive_slab: ASE Atoms (UNRELAXED primitive unit cell of slab)
+- supercell_matrix: transformation to reconstruct supercell from primitive
+- ads_pos: RELAXED adsorbate positions
+- ref_ads_pos: Reference (ground truth) adsorbate positions
 
-This script provides a framework for the conversion, but the actual
-primitive cell finding algorithm requires careful implementation.
+OC20 IS2RE format contains:
+- pos: Initial (unrelaxed) atomic positions
+- pos_relaxed: Relaxed atomic positions
+- tags: 0=subsurface, 1=surface, 2=adsorbate
+- y_relaxed: Relaxed energy
+
+The conversion extracts:
+1. Slab from INITIAL structure (tags 0,1) -> find primitive cell
+2. Adsorbate from RELAXED structure (tag 2)
 
 Usage:
     uv run python src/scripts/convert_oc20_to_mincatflow.py \
-        --input dataset/oc20_raw/is2re/train \
+        --input dataset/oc20_raw/is2res_train_val_test_lmdbs/data/is2re/10k/train/data.lmdb \
         --output dataset/train/dataset.lmdb
 
 References:
@@ -24,186 +32,198 @@ import lmdb
 import pickle
 import numpy as np
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from tqdm import tqdm
 
 from ase import Atoms
-from ase.io import read as ase_read
 from pymatgen.core import Structure, Lattice
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from pymatgen.io.ase import AseAtomsAdaptor
 
 
-def identify_adsorbate_atoms(atoms: Atoms, tag_value: int = 2) -> Tuple[np.ndarray, np.ndarray]:
+def extract_pyg_data(data) -> Dict[str, Any]:
     """
-    Identify adsorbate atoms based on tags.
-    
-    In OC20, atoms are typically tagged as:
-    - 0: bulk atoms
-    - 1: surface atoms  
-    - 2: adsorbate atoms
-    
+    Extract data from PyG Data object (handles version compatibility).
+
     Args:
-        atoms: ASE Atoms object
-        tag_value: Tag value for adsorbate atoms (default: 2)
-    
+        data: PyG Data object (may be from older version)
+
     Returns:
-        Tuple of (adsorbate_indices, slab_indices)
+        Dictionary with extracted fields
     """
-    tags = atoms.get_tags()
-    adsorbate_idx = np.where(tags == tag_value)[0]
-    slab_idx = np.where(tags != tag_value)[0]
-    return adsorbate_idx, slab_idx
+    # Access internal dict to avoid PyG version issues
+    internal = object.__getattribute__(data, '__dict__')
+
+    result = {}
+    fields = ['pos', 'pos_relaxed', 'atomic_numbers', 'cell', 'tags',
+              'y_init', 'y_relaxed', 'sid', 'natoms', 'fixed']
+
+    for field in fields:
+        if field in internal:
+            val = internal[field]
+            # Convert torch tensors to numpy
+            if hasattr(val, 'numpy'):
+                val = val.numpy()
+            result[field] = val
+
+    return result
 
 
-def find_primitive_cell(slab_atoms: Atoms) -> Tuple[Atoms, np.ndarray]:
+def find_primitive_cell(slab_atoms: Atoms, symprec: float = 0.1) -> Tuple[Atoms, np.ndarray]:
     """
     Find the primitive cell of a slab structure.
-    
-    This is a complex operation that may require:
-    1. Converting to pymatgen Structure
-    2. Using SpacegroupAnalyzer to find primitive cell
-    3. Computing the transformation matrix
-    
-    Note: This is a simplified implementation. Full MinCatFlow data
-    preparation likely uses more sophisticated methods.
-    
+
+    Uses pymatgen's SpacegroupAnalyzer to identify symmetry and
+    find the primitive cell, then computes the supercell matrix.
+
     Args:
         slab_atoms: ASE Atoms of the slab (without adsorbate)
-    
+        symprec: Symmetry precision for structure matching
+
     Returns:
         Tuple of (primitive_slab, supercell_matrix)
     """
     adaptor = AseAtomsAdaptor()
-    
+
     # Convert to pymatgen Structure
     structure = adaptor.get_structure(slab_atoms)
-    
-    # Try to find primitive cell using symmetry analysis
-    # This may not work for all slab structures
+
     try:
-        analyzer = SpacegroupAnalyzer(structure, symprec=0.1)
+        analyzer = SpacegroupAnalyzer(structure, symprec=symprec)
         primitive_struct = analyzer.find_primitive()
-        
+
         if primitive_struct is None:
             # Fallback: use original as primitive
             primitive_struct = structure
             supercell_matrix = np.eye(3)
         else:
-            # Compute supercell matrix
-            # This is approximate - full implementation would be more rigorous
+            # Compute supercell matrix: supercell = primitive @ matrix
             prim_lattice = primitive_struct.lattice.matrix
             super_lattice = structure.lattice.matrix
-            # supercell_matrix @ prim_lattice = super_lattice
+            # Solve: supercell_matrix @ prim_lattice = super_lattice
             supercell_matrix = np.linalg.solve(prim_lattice.T, super_lattice.T).T
-            
+
     except Exception as e:
         print(f"Warning: Primitive cell finding failed: {e}")
         primitive_struct = structure
         supercell_matrix = np.eye(3)
-    
+
     # Convert back to ASE Atoms
     primitive_atoms = adaptor.get_atoms(primitive_struct)
-    
+
     return primitive_atoms, supercell_matrix.astype(np.float32)
 
 
-def convert_sample(atoms: Atoms, energy: Optional[float] = None) -> Dict[str, Any]:
+def convert_oc20_sample(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Convert a single OC20 sample to MinCatFlow format.
-    
+    Convert a single OC20 IS2RE sample to MinCatFlow format.
+
     Args:
-        atoms: ASE Atoms object (catalyst + adsorbate system)
-        energy: Reference energy (optional)
-    
+        data: Dictionary with OC20 fields (pos, pos_relaxed, tags, etc.)
+
     Returns:
-        Dictionary in MinCatFlow format
+        Dictionary in MinCatFlow format, or None if conversion fails
     """
-    # Identify adsorbate and slab atoms
-    ads_idx, slab_idx = identify_adsorbate_atoms(atoms)
-    
-    # Extract adsorbate information
-    ads_atomic_numbers = atoms.numbers[ads_idx]
-    ads_pos = atoms.positions[ads_idx]
-    
-    # Extract slab atoms
-    slab_atoms = atoms[slab_idx]
-    
+    pos_initial = data['pos']
+    pos_relaxed = data['pos_relaxed']
+    atomic_numbers = data['atomic_numbers'].astype(np.int64)
+    cell = data['cell']
+    tags = data['tags']
+    y_relaxed = data.get('y_relaxed', 0.0)
+
+    # Handle cell shape: (1, 3, 3) -> (3, 3)
+    if cell.ndim == 3:
+        cell = cell[0]
+
+    # Identify adsorbate (tag=2) and slab (tag=0,1) atoms
+    ads_mask = tags == 2
+    slab_mask = tags != 2
+
+    ads_idx = np.where(ads_mask)[0]
+    slab_idx = np.where(slab_mask)[0]
+
+    if len(ads_idx) == 0:
+        return None  # No adsorbate atoms
+
+    # Extract adsorbate from RELAXED structure
+    ads_atomic_numbers = atomic_numbers[ads_idx]
+    ads_pos_relaxed = pos_relaxed[ads_idx]
+
+    # Extract slab from INITIAL structure
+    slab_numbers = atomic_numbers[slab_idx]
+    slab_pos_initial = pos_initial[slab_idx]
+
+    # Create ASE Atoms for slab
+    slab_atoms = Atoms(
+        numbers=slab_numbers,
+        positions=slab_pos_initial,
+        cell=cell,
+        pbc=True
+    )
+
     # Find primitive cell
     primitive_slab, supercell_matrix = find_primitive_cell(slab_atoms)
-    
-    # Estimate n_slab and n_vac from cell dimensions
-    # This is approximate - real values should come from metadata
-    cell_z = atoms.cell[2, 2]
-    slab_z = slab_atoms.positions[:, 2].max() - slab_atoms.positions[:, 2].min()
+
+    # Estimate n_slab and n_vac
+    cell_z = cell[2, 2]
+    slab_z = slab_pos_initial[:, 2].max() - slab_pos_initial[:, 2].min()
     n_slab = 3  # Default assumption
-    n_vac = max(1, int((cell_z - slab_z) / slab_z))
-    
+    n_vac = max(1, int((cell_z - slab_z) / slab_z)) if slab_z > 0 else 1
+
     sample = {
         "primitive_slab": primitive_slab,
         "supercell_matrix": supercell_matrix,
-        "ads_atomic_numbers": ads_atomic_numbers.astype(np.int64),
-        "ads_pos": ads_pos.astype(np.float32),
-        "ref_ads_pos": ads_pos.astype(np.float32),  # Use same as ads_pos
+        "ads_atomic_numbers": ads_atomic_numbers,
+        "ads_pos": ads_pos_relaxed.astype(np.float32),
+        "ref_ads_pos": ads_pos_relaxed.astype(np.float32),
         "n_slab": n_slab,
         "n_vac": n_vac,
-        "ref_energy": energy if energy is not None else 0.0,
+        "ref_energy": float(y_relaxed) if y_relaxed is not None else 0.0,
     }
-    
+
     return sample
 
 
-def read_oc20_lmdb(lmdb_path: Path) -> list:
+def read_oc20_is2re_lmdb(lmdb_path: Path, max_samples: Optional[int] = None) -> List[Dict[str, Any]]:
     """
-    Read samples from OC20 LMDB format.
-    
+    Read samples from OC20 IS2RE LMDB format.
+
     Args:
-        lmdb_path: Path to LMDB directory
-    
+        lmdb_path: Path to LMDB file (data.lmdb)
+        max_samples: Maximum number of samples to read (None for all)
+
     Returns:
-        List of (atoms, energy) tuples
+        List of data dictionaries
     """
     samples = []
-    
+
+    # OC20 IS2RE uses subdir=False (single file)
     env = lmdb.open(
         str(lmdb_path),
-        subdir=True,  # OC20 uses directory format
+        subdir=False,
         readonly=True,
         lock=False,
         readahead=True,
         meminit=False,
     )
-    
+
     with env.begin() as txn:
         cursor = txn.cursor()
-        for key, value in cursor:
+        for key, value in tqdm(cursor, desc="Reading OC20 LMDB"):
             if key == b"length":
                 continue
-            
+
+            if max_samples and len(samples) >= max_samples:
+                break
+
             try:
                 data = pickle.loads(value)
-                
-                # OC20 format typically has 'pos', 'atomic_numbers', 'cell', etc.
-                if isinstance(data, dict):
-                    pos = data.get("pos", data.get("positions"))
-                    numbers = data.get("atomic_numbers", data.get("numbers"))
-                    cell = data.get("cell")
-                    tags = data.get("tags", np.zeros(len(numbers)))
-                    energy = data.get("y", data.get("energy", None))
-                    
-                    atoms = Atoms(
-                        numbers=numbers,
-                        positions=pos,
-                        cell=cell,
-                        pbc=True,
-                        tags=tags,
-                    )
-                    samples.append((atoms, energy))
-                    
+                extracted = extract_pyg_data(data)
+                samples.append(extracted)
             except Exception as e:
                 print(f"Warning: Failed to parse sample {key}: {e}")
                 continue
-    
+
     env.close()
     return samples
 
@@ -250,7 +270,7 @@ def main():
         "--input",
         type=str,
         required=True,
-        help="Path to OC20 LMDB directory",
+        help="Path to OC20 LMDB file (e.g., data.lmdb)",
     )
     parser.add_argument(
         "--output",
@@ -264,14 +284,25 @@ def main():
         default=None,
         help="Maximum number of samples to convert (for testing)",
     )
+    parser.add_argument(
+        "--symprec",
+        type=float,
+        default=0.1,
+        help="Symmetry precision for primitive cell finding (default: 0.1)",
+    )
     args = parser.parse_args()
-    
+
     input_path = Path(args.input)
     output_path = Path(args.output)
-    
-    print(f"Reading OC20 data from: {input_path}")
+
+    print("=" * 60)
+    print("OC20 IS2RE to MinCatFlow Conversion")
+    print("=" * 60)
     print()
-    
+    print(f"Input:  {input_path}")
+    print(f"Output: {output_path}")
+    print()
+
     # Check if input exists
     if not input_path.exists():
         print(f"ERROR: Input path does not exist: {input_path}")
@@ -279,44 +310,58 @@ def main():
         print("To download OC20 data, run:")
         print("  bash scripts/data/download_data.sh oc20")
         return
-    
+
     # Read OC20 samples
-    print("Loading OC20 samples...")
-    oc20_samples = read_oc20_lmdb(input_path)
+    print("Step 1: Reading OC20 IS2RE samples...")
+    oc20_samples = read_oc20_is2re_lmdb(input_path, max_samples=args.max_samples)
     print(f"Loaded {len(oc20_samples)} samples")
-    
-    if args.max_samples:
-        oc20_samples = oc20_samples[:args.max_samples]
-        print(f"Using first {len(oc20_samples)} samples")
-    
+
     # Convert samples
     print()
-    print("Converting to MinCatFlow format...")
+    print("Step 2: Converting to MinCatFlow format...")
+    print("  - Slab: from INITIAL structure (unrelaxed)")
+    print("  - Adsorbate: from RELAXED structure")
+    print("  - Finding primitive cells...")
+    print()
+
     mincatflow_samples = []
-    
-    for atoms, energy in tqdm(oc20_samples, desc="Converting"):
+    failed = 0
+
+    for data in tqdm(oc20_samples, desc="Converting"):
         try:
-            sample = convert_sample(atoms, energy)
-            mincatflow_samples.append(sample)
+            sample = convert_oc20_sample(data)
+            if sample is not None:
+                mincatflow_samples.append(sample)
+            else:
+                failed += 1
         except Exception as e:
             print(f"Warning: Failed to convert sample: {e}")
+            failed += 1
             continue
-    
-    print(f"Successfully converted {len(mincatflow_samples)} samples")
-    
+
+    print()
+    print(f"Successfully converted: {len(mincatflow_samples)} samples")
+    if failed > 0:
+        print(f"Failed/skipped: {failed} samples")
+
     # Write output
     print()
-    print(f"Writing to: {output_path}")
+    print("Step 3: Writing MinCatFlow LMDB...")
     write_mincatflow_lmdb(mincatflow_samples, output_path)
-    
+
     print()
+    print("=" * 60)
     print("Conversion complete!")
+    print("=" * 60)
     print()
-    print("NOTE: This conversion uses a simplified primitive cell finding algorithm.")
-    print("For production use, you may need:")
-    print("  - More sophisticated primitive cell identification")
-    print("  - Proper n_slab and n_vac from metadata")
-    print("  - Correct reference energy computation")
+    print("Output format:")
+    print("  - primitive_slab: ASE Atoms (unrelaxed primitive cell)")
+    print("  - supercell_matrix: (3,3) transformation matrix")
+    print("  - ads_pos: (N,3) relaxed adsorbate positions")
+    print("  - ref_ads_pos: (N,3) reference positions")
+    print("  - ads_atomic_numbers: (N,) adsorbate elements")
+    print("  - n_slab, n_vac: layer counts")
+    print("  - ref_energy: relaxed energy")
 
 
 if __name__ == "__main__":

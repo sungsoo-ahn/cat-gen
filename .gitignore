@@ -25,8 +25,11 @@ ENV/
 .env.local
 
 # Data directories (outputs)
-data/
-dataset/
+/data/
+/dataset/
+/metadata/
+/processing_results/
+*.tar.gz
 
 # Resources (cloned repos, reference materials)
 resources/
