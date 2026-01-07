@@ -28,7 +28,7 @@
 #
 # Option 2: Download OC20 IS2RE data (standard OC20 format, NOT MinCatFlow format)
 #   - This script downloads standard OC20 LMDBs
-#   - These need conversion to MinCatFlow format (see src/scripts/convert_oc20_to_mincatflow.py)
+#   - These need conversion to MinCatFlow format (see scripts/data/convert_oc20.sh)
 #
 # Option 3: Get preprocessed MinCatFlow-format data from the authors
 #   - Contact: https://github.com/sungsoo-ahn/MinCatFlow
@@ -94,7 +94,8 @@ case "$OPTION" in
         echo ""
         echo "NEXT STEPS:"
         echo "1. Convert to MinCatFlow format using:"
-        echo "   uv run python src/scripts/convert_oc20_to_mincatflow.py"
+        echo "   bash scripts/data/convert_oc20.sh train"
+        echo "   bash scripts/data/convert_oc20.sh val_id"
         echo ""
         echo "2. Or use synthetic data for initial testing:"
         echo "   bash scripts/data/download_data.sh synthetic"

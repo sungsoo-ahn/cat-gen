@@ -49,14 +49,11 @@ Download and process OC20 (Open Catalyst 2020) data:
 
 ```bash
 # Download OC20 dataset (requires ~50GB disk space)
-bash scripts/data/download_data.sh
+bash scripts/data/download_data.sh oc20
 
-# Extract metadata from raw LMDB files
-bash scripts/data/extract_metadata.sh
-
-# Convert to MinCatFlow format (outputs to dataset/train/ and dataset/val_id/)
-bash scripts/data/process_oc20.sh train
-bash scripts/data/process_oc20.sh val_id
+# Convert to MinCatFlow format (outputs to processing_results/)
+bash scripts/data/convert_oc20.sh train
+bash scripts/data/convert_oc20.sh val_id
 ```
 
 The processed data contains ~460K adsorbate+catalyst structures from DFT calculations.
@@ -111,7 +108,7 @@ cat-gen/
 │   │   ├── train_original.py     # Training script (original)
 │   │   ├── train_reimpl.py       # Training script (reimplementation)
 │   │   ├── generate.py           # De novo generation script
-│   │   └── process_oc20.py       # Data processing
+│   │   └── oc20_to_mincatflow.py # OC20 to MinCatFlow conversion
 │   ├── helpers.py                # Utility functions
 │   └── utils.py                  # Common utilities
 ├── configs/                      # YAML configuration files
