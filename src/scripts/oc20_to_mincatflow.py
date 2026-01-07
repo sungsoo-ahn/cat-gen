@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Convert OC20 IS2RE LMDB directly to MinCatFlow LMDB format.
 
-Simplified pipeline that skips the intermediate CSV step.
-
 Usage:
     uv run python src/scripts/oc20_to_mincatflow.py \
         --lmdb-path dataset/oc20_raw/is2re/all/train/data.lmdb \
         --mapping-path resources/oc20_data_mapping.pkl \
-        --output-path processing_results/train/dataset.lmdb
+        --adsorbates-path resources/adsorbates.pkl \
+        --output-path dataset/train/dataset.lmdb
 """
 
 import argparse
@@ -47,8 +46,6 @@ def get_slab_params(mapping: dict, sid: int) -> dict | None:
     return {
         "bulk_mpid": value.get("bulk_mpid"),
         "miller_index": value.get("miller_index"),
-        "shift": value.get("shift"),
-        "top": value.get("top"),
         "ads_id": value.get("ads_id"),
     }
 
@@ -150,7 +147,7 @@ def extract_from_lmdb(lmdb_path: str, index: int) -> dict | None:
             'ads_pos_relaxed': pos_relaxed[ads_mask] if pos_relaxed is not None and np.any(ads_mask) else None,
             'ref_energy': y_relaxed,
         }
-    except Exception as e:
+    except Exception:
         return None
     finally:
         db.close()
