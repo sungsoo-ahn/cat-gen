@@ -121,6 +121,9 @@ validation:
     ltol: 0.3
     stol: 0.5
     angle_tol: 10.0
+  # W&B structure visualization
+  log_structures_to_wandb: true
+  max_structures_to_log: 5
 
 prediction:
   num_samples: 1

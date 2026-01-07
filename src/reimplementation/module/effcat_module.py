@@ -3,12 +3,15 @@ import gc
 import json
 import time
 import random
+import tempfile
 import multiprocessing as mp
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
 import torch
 import numpy as np
+import wandb
+from ase.io import write as ase_write
 from einops import rearrange
 from lightning import Callback, LightningModule
 from lightning.pytorch.utilities import rank_zero_info
@@ -157,6 +160,7 @@ from src.reimplementation.models.loss.validation import (
 )
 from src.reimplementation.models.loss.utils import stratify_loss_by_time
 from src.reimplementation.module.flow import AtomFlowMatching
+from src.reimplementation.scripts.assemble import assemble
 
 
 class EffCatModule(LightningModule):
@@ -578,6 +582,141 @@ class EffCatModule(LightningModule):
         return_dict["ads_atom_types"] = batch["ref_ads_element"]
         self.validation_step_outputs.append(return_dict)
 
+    def _log_generated_structures_to_wandb(
+        self,
+        valid_outputs: list,
+        n_samples: int,
+        max_structures: int = 5,
+    ) -> None:
+        """
+        Log generated catalyst structures to W&B as 3D molecular visualizations.
+
+        Args:
+            valid_outputs: List of validation step outputs containing generated structures
+            n_samples: Number of samples per input (flow_samples)
+            max_structures: Maximum number of structures to log per epoch
+        """
+        if not self.logger or not hasattr(self.logger, 'experiment'):
+            rank_zero_info("| W&B logger not available, skipping structure logging.")
+            return
+
+        structures_logged = 0
+        molecules_to_log = []
+
+        for batch_idx, batch_output in enumerate(valid_outputs):
+            if structures_logged >= max_structures:
+                break
+
+            # Get data from batch output
+            sampled_prim_slab_coords = (
+                rearrange(
+                    batch_output["sampled_prim_slab_coords"],
+                    "(b m) n c -> b m n c",
+                    m=n_samples,
+                )
+                .cpu()
+                .numpy()
+            )
+            sampled_ads_coords = (
+                rearrange(
+                    batch_output["sampled_ads_coords"],
+                    "(b m) n c -> b m n c",
+                    m=n_samples,
+                )
+                .cpu()
+                .numpy()
+            )
+            sampled_lattices = (
+                rearrange(
+                    batch_output["sampled_lattices"],
+                    "(b m) c -> b m c",
+                    m=n_samples,
+                )
+                .cpu()
+                .numpy()
+            )
+            sampled_supercell_matrices = (
+                rearrange(
+                    batch_output["sampled_supercell_matrices"],
+                    "(b m) ... -> b m ...",
+                    m=n_samples,
+                )
+                .cpu()
+                .numpy()
+            )
+            sampled_scaling_factors = (
+                rearrange(
+                    batch_output["sampled_scaling_factors"],
+                    "(b m) -> b m",
+                    m=n_samples,
+                )
+                .cpu()
+                .numpy()
+            )
+            prim_slab_atom_types = batch_output["prim_slab_atom_types"].cpu().numpy()
+            ads_atom_types = batch_output["ads_atom_types"].cpu().numpy()
+            prim_slab_atom_mask = batch_output["prim_slab_atom_mask"].cpu().numpy().astype(bool)
+            ads_atom_mask = batch_output["ads_atom_mask"].cpu().numpy().astype(bool)
+
+            batch_size = sampled_prim_slab_coords.shape[0]
+
+            for i in range(batch_size):
+                if structures_logged >= max_structures:
+                    break
+
+                # Only log the first sample (sample_idx=0) for each batch item
+                sample_idx = 0
+
+                try:
+                    # Assemble the structure
+                    atoms, _ = assemble(
+                        generated_prim_slab_coords=sampled_prim_slab_coords[i, sample_idx],
+                        generated_ads_coords=sampled_ads_coords[i, sample_idx],
+                        generated_lattice=sampled_lattices[i, sample_idx],
+                        generated_supercell_matrix=sampled_supercell_matrices[i, sample_idx],
+                        generated_scaling_factor=sampled_scaling_factors[i, sample_idx],
+                        prim_slab_atom_types=prim_slab_atom_types[i],
+                        ads_atom_types=ads_atom_types[i],
+                        prim_slab_atom_mask=prim_slab_atom_mask[i],
+                        ads_atom_mask=ads_atom_mask[i],
+                    )
+
+                    # Write to temporary XYZ file and log
+                    with tempfile.NamedTemporaryFile(
+                        mode='w', suffix='.xyz', delete=False
+                    ) as f:
+                        temp_path = f.name
+
+                    ase_write(temp_path, atoms, format='xyz')
+
+                    molecules_to_log.append(
+                        wandb.Molecule(
+                            temp_path,
+                            caption=f"Generated catalyst (epoch {self.current_epoch}, sample {structures_logged})"
+                        )
+                    )
+
+                    # Clean up temp file
+                    os.unlink(temp_path)
+                    structures_logged += 1
+
+                except Exception as e:
+                    rank_zero_info(
+                        f"| WARNING: Failed to log structure {structures_logged}: {e}"
+                    )
+                    continue
+
+        # Log all molecules to W&B
+        if molecules_to_log:
+            try:
+                self.logger.experiment.log({
+                    "val/generated_structures": molecules_to_log,
+                    "epoch": self.current_epoch,
+                })
+                rank_zero_info(f"| Logged {len(molecules_to_log)} generated structures to W&B.")
+            except Exception as e:
+                rank_zero_info(f"| WARNING: Failed to log structures to W&B: {e}")
+
     def on_validation_epoch_end(self) -> None:
         # NOTE: This hook is called on ALL ranks in DDP, but we only execute code on rank 0.
         # PyTorch Lightning will synchronize all ranks after this hook completes.
@@ -950,6 +1089,16 @@ class EffCatModule(LightningModule):
                     )
                 else:
                     self.log("val/avg_adsorption_energy", float("nan"), rank_zero_only=True)
+
+            # Log generated structures to W&B as 3D visualizations
+            log_structures = self.validation_args.get("log_structures_to_wandb", False)
+            if log_structures:
+                max_structures = self.validation_args.get("max_structures_to_log", 5)
+                self._log_generated_structures_to_wandb(
+                    valid_outputs=valid_outputs,
+                    n_samples=n_samples,
+                    max_structures=max_structures,
+                )
 
             # Reset metrics for next epoch
             self.val_prim_match_rate.reset()
