@@ -23,7 +23,7 @@ data:
     train: 2
     val: 2
     test: 2
-  preload_to_ram: true
+  preload_to_ram: false  # Disable to speed up startup
   use_pyg: false
 
 # Smaller model for testing
@@ -84,6 +84,8 @@ training:
   gradient_clip_val: 10.0
   gradient_clip_algorithm: "norm"
   val_check_interval: 1.0  # Once per epoch (1.0 = 100% of training)
+  limit_train_batches: 10  # Only 10 training batches per epoch
+  limit_val_batches: 5     # Only 5 validation batches per epoch
 
   train_multiplicity: 1
   loss_type: "l2"
@@ -106,7 +108,7 @@ training:
     mode: "min"
 
 validation:
-  sample_every_n_epochs: 10  # Skip expensive sampling in test
+  sample_every_n_epochs: 1  # Sample every epoch for testing W&B visualization
   flow_samples: 1
   sampling_steps: 10
   sampling_center_coords: false

@@ -481,6 +481,7 @@ class EffCatModule(LightningModule):
 
         structures_logged = 0
         molecules_to_log = []
+        temp_files = []  # Track temp files for cleanup after logging
 
         for batch_idx, batch_output in enumerate(valid_outputs):
             if structures_logged >= max_structures:
@@ -560,13 +561,14 @@ class EffCatModule(LightningModule):
                         ads_atom_mask=ads_atom_mask[i],
                     )
 
-                    # Write to temporary XYZ file and log
+                    # Write to temporary PDB file and log (W&B supports PDB, not XYZ)
                     with tempfile.NamedTemporaryFile(
-                        mode='w', suffix='.xyz', delete=False
+                        mode='w', suffix='.pdb', delete=False
                     ) as f:
                         temp_path = f.name
 
-                    ase_write(temp_path, atoms, format='xyz')
+                    ase_write(temp_path, atoms, format='proteindatabank')
+                    temp_files.append(temp_path)  # Track for cleanup
 
                     molecules_to_log.append(
                         wandb.Molecule(
@@ -574,9 +576,6 @@ class EffCatModule(LightningModule):
                             caption=f"Generated catalyst (epoch {self.current_epoch}, sample {structures_logged})"
                         )
                     )
-
-                    # Clean up temp file
-                    os.unlink(temp_path)
                     structures_logged += 1
 
                 except Exception as e:
@@ -595,6 +594,13 @@ class EffCatModule(LightningModule):
                 rank_zero_info(f"| Logged {len(molecules_to_log)} generated structures to W&B.")
             except Exception as e:
                 rank_zero_info(f"| WARNING: Failed to log structures to W&B: {e}")
+
+        # Clean up temp files after logging
+        for temp_path in temp_files:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
     def on_validation_epoch_end(self) -> None:
         # NOTE: This hook is called on ALL ranks in DDP, but we only execute code on rank 0.
