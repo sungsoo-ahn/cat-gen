@@ -322,16 +322,13 @@ class AtomFlowMatching(Module):
         # Standardize prim_slab and ads coordinates using mean/std
         prim_slab_r_noisy = self.prior_sampler.normalize_prim_slab_coords(noised_prim_slab_coords)
         ads_r_noisy = self.prior_sampler.normalize_ads_coords(noised_ads_coords)
-        
-        # Lattice: lengths (Angstrom -> nm), angles (degrees -> radians)
-        l_noisy = noised_lattice.clone()
-        l_noisy[:, :3] = self.ANG_TO_NM_SCALE * noised_lattice[:, :3]
-        l_noisy[:, 3:] = (torch.pi / 180.0) * noised_lattice[:, 3:]
 
-        # Normalize supercell matrix (scaling factor uses raw values without normalization)
-        # sm_noisy = self.prior_sampler.normalize_supercell(noised_supercell_matrix)
-        sm_noisy = noised_supercell_matrix
-        sf_noisy = noised_scaling_factor
+        # Full lattice normalization: unit conversion + Z-score
+        l_noisy = self.prior_sampler.normalize_lattice(noised_lattice)
+
+        # Normalize supercell matrix and scaling factor
+        sm_noisy = self.prior_sampler.normalize_supercell(noised_supercell_matrix)
+        sf_noisy = self.prior_sampler.normalize_scaling_factor(noised_scaling_factor)
 
         # Predict (network operates in standardized/normalized space)
         net_out = self.flow_model(
@@ -348,16 +345,13 @@ class AtomFlowMatching(Module):
         # Destandardize prim_slab and ads coordinates back to Angstrom
         denoised_prim_slab_coords = self.prior_sampler.denormalize_prim_slab_coords(net_out["prim_slab_r_update"])
         denoised_ads_coords = self.prior_sampler.denormalize_ads_coords(net_out["ads_r_update"])
-        
-        # Lattice: lengths (nm -> Angstrom), angles (radians -> degrees)
-        denoised_lattice = net_out["l_update"].clone()
-        denoised_lattice[:, :3] = self.NM_TO_ANG_SCALE * denoised_lattice[:, :3]
-        denoised_lattice[:, 3:] = (180.0 / torch.pi) * denoised_lattice[:, 3:]
 
-        # Denormalize supercell matrix back to raw space
-        # denoised_supercell_matrix = self.prior_sampler.denormalize_supercell(net_out["sm_update"])
-        denoised_supercell_matrix = net_out["sm_update"]
-        denoised_scaling_factor = net_out["sf_update"]
+        # Full lattice denormalization: Z-score undo + unit conversion
+        denoised_lattice = self.prior_sampler.denormalize_lattice(net_out["l_update"])
+
+        # Denormalize supercell matrix and scaling factor back to raw space
+        denoised_supercell_matrix = self.prior_sampler.denormalize_supercell(net_out["sm_update"])
+        denoised_scaling_factor = self.prior_sampler.denormalize_scaling_factor(net_out["sf_update"])
         
         # Return element when dng=True (logits format)
         if self.dng:
