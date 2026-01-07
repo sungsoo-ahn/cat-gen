@@ -293,8 +293,13 @@ class AtomAttentionDecoder(Module):
             nn.LayerNorm(atom_s), LinearNoBias(atom_s, 3)
         )
         
-        # Projection heads for adsorbate coords
-        self.feats_to_ads_coords = nn.Sequential(
+        # Projection heads for adsorbate center (global pooling -> 3D center)
+        self.feats_to_ads_center = nn.Sequential(
+            nn.LayerNorm(atom_s), LinearNoBias(atom_s, 3)
+        )
+
+        # Projection heads for adsorbate relative coords (per-atom -> 3D relative position)
+        self.feats_to_ads_rel_coords = nn.Sequential(
             nn.LayerNorm(atom_s), LinearNoBias(atom_s, 3)
         )
 
@@ -355,8 +360,16 @@ class AtomAttentionDecoder(Module):
         # Prim slab position prediction
         prim_slab_r_update = self.feats_to_prim_slab_coords(x_prim_slab)
 
-        # Adsorbate position prediction
-        ads_r_update = self.feats_to_ads_coords(x_ads)
+        # Adsorbate center prediction (global pooling of adsorbate atoms)
+        num_ads_atoms = ads_mask.sum(dim=1, keepdim=True)  # (B*mult, 1)
+        x_ads_global = torch.sum(x_ads * ads_mask[..., None], dim=1) / (num_ads_atoms + 1e-8)  # (B*mult, atom_s)
+        ads_center_update = self.feats_to_ads_center(x_ads_global)  # (B*mult, 3)
+
+        # Adsorbate relative position prediction (per-atom)
+        ads_rel_update = self.feats_to_ads_rel_coords(x_ads)  # (B*mult, M, 3)
+
+        # Final adsorbate coords = center + relative
+        ads_r_update = ads_center_update.unsqueeze(1) + ads_rel_update  # (B*mult, M, 3)
 
         # Global pooling (use prim_slab atoms only)
         num_prim_slab_atoms = prim_slab_mask.sum(dim=1, keepdim=True)  # (B*mult, 1)
@@ -376,9 +389,26 @@ class AtomAttentionDecoder(Module):
         if hasattr(self, 'feats_to_prim_slab_element'):
             prim_slab_element_update = self.feats_to_prim_slab_element(x_prim_slab)
             # (B*mult, N, NUM_ELEMENTS) - logits format (softmax is applied during loss/vector field computation)
-            return prim_slab_r_update, ads_r_update, l_update, sm_update, sf_update, prim_slab_element_update
+            return {
+                "prim_slab_r_update": prim_slab_r_update,
+                "ads_r_update": ads_r_update,
+                "ads_center_update": ads_center_update,  # (B*mult, 3) explicit center prediction
+                "ads_rel_update": ads_rel_update,  # (B*mult, M, 3) relative positions
+                "l_update": l_update,
+                "sm_update": sm_update,
+                "sf_update": sf_update,
+                "prim_slab_element_update": prim_slab_element_update,
+            }
         else:
-            return prim_slab_r_update, ads_r_update, l_update, sm_update, sf_update
+            return {
+                "prim_slab_r_update": prim_slab_r_update,
+                "ads_r_update": ads_r_update,
+                "ads_center_update": ads_center_update,  # (B*mult, 3) explicit center prediction
+                "ads_rel_update": ads_rel_update,  # (B*mult, M, 3) relative positions
+                "l_update": l_update,
+                "sm_update": sm_update,
+                "sf_update": sf_update,
+            }
 
 
 class TokenTransformer(Module):

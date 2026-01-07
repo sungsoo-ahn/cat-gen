@@ -31,24 +31,16 @@ class PriorSampler(Protocol):
 
 class CatPriorSampler:
     """Prior sampler for flow matching.
-
+    
     Samples all priors needed for flow matching:
     - prim_slab_coords_0: N(0, coord_std^2) in normalized space, then denormalized to raw space (Angstrom)
     - ads_coords_0: N(0, coord_std^2) in normalized space, then denormalized to raw space (Angstrom)
     - lattice_0: LogNormal (lengths) + Uniform (angles) - raw space (Angstrom, degrees)
     - supercell_matrix_0: N(0, 1) in normalized space, then denormalized to raw space
-    - scaling_factor_0: N(0, coord_std^2) in normalized space, then denormalized to raw space
-
-    Note: All continuous variables except lattice are sampled in normalized space and then
-    denormalized to raw space. Lattice uses domain-specific distributions (LogNormal + Uniform)
-    in raw space for physical plausibility.
-
-    Normalization methods are provided for all variables:
-    - normalize_prim_slab_coords / denormalize_prim_slab_coords: Z-score for coordinates
-    - normalize_ads_coords / denormalize_ads_coords: Z-score for coordinates
-    - normalize_supercell / denormalize_supercell: Z-score for supercell matrix
-    - normalize_lattice / denormalize_lattice: Unit conversion + Z-score
-    - normalize_scaling_factor / denormalize_scaling_factor: Z-score
+    - scaling_factor_0: N(0, coord_std^2) - Gaussian (raw space, no normalization)
+    
+    Note: prim_slab_coords, ads_coords, and supercell_matrix are sampled in normalized space and then
+    denormalized to raw space. Lattice uses non-Gaussian distributions in raw space. Scaling factor uses raw Gaussian prior.
     """
 
     def __init__(
@@ -67,14 +59,6 @@ class CatPriorSampler:
         prim_slab_coord_std: List[float] = None,
         ads_coord_mean: List[float] = None,
         ads_coord_std: List[float] = None,
-        # Lattice normalization parameters (after unit conversion: nm, radians)
-        lattice_length_mean: List[float] = None,
-        lattice_length_std: List[float] = None,
-        lattice_angle_mean: List[float] = None,
-        lattice_angle_std: List[float] = None,
-        # Scaling factor normalization parameters
-        scaling_factor_mean: float = 0.0,
-        scaling_factor_std: float = 1.0,
     ):
         self.coord_std = coord_std
 
@@ -99,22 +83,10 @@ class CatPriorSampler:
         self.ads_coord_mean = torch.tensor(ads_coord_mean, dtype=torch.float32)  # (3,)
         self.ads_coord_std = torch.tensor(ads_coord_std, dtype=torch.float32)  # (3,)
 
-        # Lattice normalization parameters (after unit conversion)
-        if lattice_length_mean is not None:
-            self.lattice_length_mean = torch.tensor(lattice_length_mean, dtype=torch.float32)  # (3,) nm
-            self.lattice_length_std = torch.tensor(lattice_length_std, dtype=torch.float32)  # (3,) nm
-            self.lattice_angle_mean = torch.tensor(lattice_angle_mean, dtype=torch.float32)  # (3,) radians
-            self.lattice_angle_std = torch.tensor(lattice_angle_std, dtype=torch.float32)  # (3,) radians
-        else:
-            # Default: no normalization (mean=0, std=1 after unit conversion)
-            self.lattice_length_mean = torch.zeros(3, dtype=torch.float32)
-            self.lattice_length_std = torch.ones(3, dtype=torch.float32)
-            self.lattice_angle_mean = torch.zeros(3, dtype=torch.float32)
-            self.lattice_angle_std = torch.ones(3, dtype=torch.float32)
-
-        # Scaling factor normalization parameters
-        self.scaling_factor_mean = scaling_factor_mean
-        self.scaling_factor_std = scaling_factor_std
+        # Angle normalization parameters (degrees)
+        # Mean is center of uniform range, std is sqrt(variance) of uniform distribution
+        self.angle_mean = (uniform_low + uniform_high) / 2.0  # 90.0
+        self.angle_std = (uniform_high - uniform_low) / (2 * 3**0.5)  # ~17.32 for uniform
 
     def sample(self, data: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Sample from prior distributions for coords, lattice, and supercell matrix."""
@@ -157,13 +129,16 @@ class CatPriorSampler:
         # Combine into lattice_0: (a, b, c, alpha, beta, gamma)
         lattice_0 = torch.cat([lengths_0, angles_0], dim=-1)  # (B, 6)
 
-        # Sample supercell matrix from standard normal N(0, 1) in normalized space, then denormalize to raw space
-        supercell_matrix_0_normalized = torch.randn(batch_size, 3, 3, device=device, dtype=dtype)  # (B, 3, 3)
-        supercell_matrix_0 = self.denormalize_supercell(supercell_matrix_0_normalized)  # (B, 3, 3) raw space
+        # # Sample supercell matrix from standard normal N(0, 1) in normalized space, then denormalize to raw space
+        # supercell_matrix_0_normalized = torch.randn(batch_size, 3, 3, device=device, dtype=dtype)  # (B, 3, 3)
+        # supercell_matrix_0 = self.denormalize_supercell(supercell_matrix_0_normalized)  # (B, 3, 3) raw space
+        
+        identity = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).repeat(batch_size, 1, 1)
+        noise = torch.randn(batch_size, 3, 3, device=device, dtype=dtype) * 0.1
+        supercell_matrix_0 = identity + noise
 
-        # Sample scaling factor from Gaussian N(0, coord_std^2) in normalized space, then denormalize
-        scaling_factor_0_normalized = torch.randn(batch_size, device=device, dtype=dtype) * self.coord_std
-        scaling_factor_0 = self.denormalize_scaling_factor(scaling_factor_0_normalized)  # (B,) raw value
+        # Sample scaling factor from Gaussian N(0, coord_std^2) - no normalization
+        scaling_factor_0 = torch.randn(batch_size, device=device, dtype=dtype) * self.coord_std  # (B,)
 
         return {
             "prim_slab_coords_0": prim_slab_coords_0,  # (B, N, 3) raw space (Angstrom)
@@ -251,72 +226,24 @@ class CatPriorSampler:
         std = self.ads_coord_std.to(coords_normalized.device, coords_normalized.dtype)
         return coords_normalized * std + mean
 
-    def normalize_lattice(self, lattice: torch.Tensor) -> torch.Tensor:
-        """Normalize lattice parameters: raw (Ang, deg) -> normalized (Z-score nm, Z-score rad).
+    def normalize_angles(self, angles: torch.Tensor) -> torch.Tensor:
+        """Normalize lattice angles (alpha, beta, gamma) in degrees.
 
         Args:
-            lattice: (B, 6) raw lattice [a, b, c in Angstrom, alpha, beta, gamma in degrees]
+            angles: (B, 3) angles in degrees
 
         Returns:
-            (B, 6) normalized lattice [Z-score lengths in nm, Z-score angles in radians]
+            (B, 3) normalized angles (zero mean, unit variance)
         """
-        # Unit conversion
-        lengths_nm = lattice[:, :3] * 0.1  # Angstrom -> nm
-        angles_rad = lattice[:, 3:] * (torch.pi / 180.0)  # degrees -> radians
+        return (angles - self.angle_mean) / (self.angle_std + 1e-8)
 
-        # Z-score normalization
-        length_mean = self.lattice_length_mean.to(lattice.device, lattice.dtype)
-        length_std = self.lattice_length_std.to(lattice.device, lattice.dtype)
-        angle_mean = self.lattice_angle_mean.to(lattice.device, lattice.dtype)
-        angle_std = self.lattice_angle_std.to(lattice.device, lattice.dtype)
-
-        lengths_norm = (lengths_nm - length_mean) / (length_std + 1e-8)
-        angles_norm = (angles_rad - angle_mean) / (angle_std + 1e-8)
-
-        return torch.cat([lengths_norm, angles_norm], dim=-1)
-
-    def denormalize_lattice(self, lattice_norm: torch.Tensor) -> torch.Tensor:
-        """Denormalize lattice parameters: normalized -> raw (Ang, deg).
+    def denormalize_angles(self, angles_normalized: torch.Tensor) -> torch.Tensor:
+        """Denormalize lattice angles back to degrees.
 
         Args:
-            lattice_norm: (B, 6) normalized lattice
+            angles_normalized: (B, 3) normalized angles
 
         Returns:
-            (B, 6) raw lattice [a, b, c in Angstrom, alpha, beta, gamma in degrees]
+            (B, 3) angles in degrees
         """
-        length_mean = self.lattice_length_mean.to(lattice_norm.device, lattice_norm.dtype)
-        length_std = self.lattice_length_std.to(lattice_norm.device, lattice_norm.dtype)
-        angle_mean = self.lattice_angle_mean.to(lattice_norm.device, lattice_norm.dtype)
-        angle_std = self.lattice_angle_std.to(lattice_norm.device, lattice_norm.dtype)
-
-        # Undo Z-score
-        lengths_nm = lattice_norm[:, :3] * length_std + length_mean
-        angles_rad = lattice_norm[:, 3:] * angle_std + angle_mean
-
-        # Undo unit conversion
-        lengths_ang = lengths_nm * 10.0  # nm -> Angstrom
-        angles_deg = angles_rad * (180.0 / torch.pi)  # radians -> degrees
-
-        return torch.cat([lengths_ang, angles_deg], dim=-1)
-
-    def normalize_scaling_factor(self, sf: torch.Tensor) -> torch.Tensor:
-        """Normalize scaling factor using mean and std.
-
-        Args:
-            sf: (B,) raw scaling factors
-
-        Returns:
-            (B,) normalized scaling factors
-        """
-        return (sf - self.scaling_factor_mean) / (self.scaling_factor_std + 1e-8)
-
-    def denormalize_scaling_factor(self, sf_norm: torch.Tensor) -> torch.Tensor:
-        """Denormalize scaling factor back to raw space.
-
-        Args:
-            sf_norm: (B,) normalized scaling factors
-
-        Returns:
-            (B,) raw scaling factors
-        """
-        return sf_norm * self.scaling_factor_std + self.scaling_factor_mean
+        return angles_normalized * self.angle_std + self.angle_mean

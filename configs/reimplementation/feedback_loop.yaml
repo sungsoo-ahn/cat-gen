@@ -1,10 +1,10 @@
-# 100-epoch training config with 10K OC20 subset - De Novo Generation mode
-# Reimplementation with dng=true (predicts elements + coordinates)
+# Feedback loop configuration for quick training comparison (~2 min)
+# Designed for characterizing early neural network training behavior
 
-output_dir: "data/reimplementation/train_10k_dng"
+output_dir: "data/reimplementation/feedback_loop"
 
 experiment:
-  name: "mincatflow_10k_dng"
+  name: "feedback_loop"
   version: "1.0.0"
   seed: 42
   deterministic: true
@@ -20,27 +20,28 @@ data:
     val: 8
     test: 8
   num_workers:
-    train: 4
-    val: 4
-    test: 4
-  preload_to_ram: true
+    train: 0
+    val: 0
+    test: 0
+  preload_to_ram: false  # Disable for faster startup
   use_pyg: false
 
+# Minimal model for fast iteration
 model:
-  atom_s: 768
-  token_s: 768
+  atom_s: 64
+  token_s: 64
 
   flow_model_args:
-    atom_encoder_depth: 6
-    atom_encoder_heads: 12
+    atom_encoder_depth: 2
+    atom_encoder_heads: 4
     atom_encoder_positional_encoding: false
-    token_transformer_depth: 12
-    token_transformer_heads: 12
-    atom_decoder_depth: 6
-    atom_decoder_heads: 12
+    token_transformer_depth: 2
+    token_transformer_heads: 4
+    atom_decoder_depth: 2
+    atom_decoder_heads: 4
     attention_impl: "pytorch"
     activation_checkpointing: false
-    dng: true  # De Novo Generation mode - predicts elements
+    dng: true
 
   prior_sampler_args:
     coord_std: 1.0
@@ -65,7 +66,7 @@ model:
     ads_coord_std: [8.247430, 9.035212, 9.979235]
 
   flow_process_args:
-    num_sampling_steps: 50
+    num_sampling_steps: 10
     coordinate_augmentation: true
     synchronize_timesteps: false
     compile_model: false
@@ -73,7 +74,7 @@ model:
   use_kernels: false
 
 training:
-  max_epochs: 100
+  max_epochs: 2
   accelerator: "gpu"
   devices: 1
   strategy: "auto"
@@ -83,43 +84,44 @@ training:
   gradient_clip_val: 10.0
   gradient_clip_algorithm: "norm"
   val_check_interval: 1.0
+  limit_train_batches: 50  # 50 batches per epoch
+  limit_val_batches: 10    # 10 validation batches
 
   train_multiplicity: 1
   loss_type: "l2"
   prim_slab_coord_loss_weight: 1.0
   ads_coord_loss_weight: 0.1
   length_loss_weight: 1.0
-  angle_loss_weight: 0.01
+  angle_loss_weight: 1.0
   supercell_matrix_loss_weight: 1.0
   supercell_matrix_cosine_reg_weight: 0.0
   scaling_factor_loss_weight: 1.0
-  prim_slab_element_loss_weight: 5.0  # Element prediction loss for DNG mode
+  prim_slab_element_loss_weight: 5.0
 
   lr: 0.0001
   weight_decay: 0.0
   adam_beta1: 0.9
   adam_beta2: 0.999
 
-  # Learning rate scheduler
   scheduler:
-    type: "cosine_warmup"  # "none", "cosine_warmup", "linear_warmup"
-    warmup_steps: 500  # Fewer warmup steps for 10k dataset
+    type: "none"
+    warmup_steps: 20
     warmup_epochs: null
     min_lr_ratio: 0.01
 
   checkpoint:
-    save_top_k: 3
-    save_last: true
+    save_top_k: 0  # Don't save checkpoints for feedback loop
+    save_last: false
     monitor: "val/total_loss"
     mode: "min"
 
 validation:
-  sample_every_n_epochs: 10
+  sample_every_n_epochs: 100  # Skip sampling in feedback loop
   flow_samples: 1
-  sampling_steps: 50
+  sampling_steps: 10
   sampling_center_coords: false
-  timeout: 120
-  num_workers: 4
+  timeout: 60
+  num_workers: 2
   n_prim_slab_atoms_histogram_path: null
   max_n_prim_slab_atoms: null
   compute_adsorption: false
@@ -130,22 +132,21 @@ validation:
     ltol: 0.3
     stol: 0.5
     angle_tol: 10.0
-  # W&B structure visualization
-  log_structures_to_wandb: true
-  max_structures_to_log: 5
+  log_structures_to_wandb: false
+  max_structures_to_log: 0
 
 prediction:
   num_samples: 1
-  sampling_steps: 50
+  sampling_steps: 10
   sampling_center_coords: false
   refine_final: false
 
 wandb:
-  enabled: true
+  enabled: false  # Disabled for fast iteration
   project: "CatGen"
   entity: null
-  mode: "online"
-  tags: ["10k", "dng", "reimplementation", "100epoch"]
-  notes: "100-epoch training on 10K OC20 subset with DNG mode (reimplementation)"
+  mode: "offline"
+  tags: ["feedback_loop"]
+  notes: "Feedback loop for training comparison"
   watch_gradients: false
   watch_freq: 100

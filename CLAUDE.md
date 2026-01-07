@@ -158,6 +158,64 @@ output_dir/
 - `uv.lock` is committed for reproducibility
 - Commit messages should be descriptive
 
+## Multi-Agent Worktree Workflow
+
+This project uses git worktrees for parallel development by multiple agents.
+
+### Worktree Structure
+```
+/home/sungsoo/code/cat-gen                   (main branch - primary)
+/home/sungsoo/code/cat-gen-agent-reimpl-1    (agent-reimpl-1 branch)
+/home/sungsoo/code/cat-gen-agent-reimpl-2    (agent-reimpl-2 branch)
+```
+
+Both agent worktrees are for improving the reimplementation. The original implementation should NOT be modified.
+
+### Before Starting Work
+Always sync with main first:
+```bash
+cd /home/sungsoo/code/cat-gen-agent-reimpl-{N}
+git fetch origin main && git rebase origin/main
+```
+
+### Merge to Main (No PR Required)
+When an agent completes work, merge directly to main:
+
+```bash
+# 1. Commit changes in agent worktree
+cd /home/sungsoo/code/cat-gen-agent-reimpl-{N}
+git add -A && git commit -m "Description of changes"
+
+# 2. Merge from main worktree
+cd /home/sungsoo/code/cat-gen
+git merge agent-reimpl-{N} --no-ff -m "Merge agent-reimpl-{N}: description"
+git push origin main
+
+# 3. Sync agent branch back to main
+cd /home/sungsoo/code/cat-gen-agent-reimpl-{N}
+git fetch origin main && git rebase origin/main
+```
+
+### Conflict Resolution
+If merge conflicts occur:
+1. Resolve conflicts in the main worktree
+2. Complete the merge commit
+3. All agent worktrees should rebase onto updated main
+
+### Creating New Worktrees
+```bash
+cd /home/sungsoo/code/cat-gen
+git branch agent-reimpl-{N} main
+git worktree add ../cat-gen-agent-reimpl-{N} agent-reimpl-{N}
+```
+
+### Removing Worktrees
+```bash
+git worktree remove /home/sungsoo/code/cat-gen-agent-reimpl-{N} --force
+git branch -d agent-reimpl-{N}
+git worktree prune
+```
+
 ## Testing
 
 Before committing:

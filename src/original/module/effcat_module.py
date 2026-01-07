@@ -1,18 +1,13 @@
 import os
 import gc
 import json
-import math
 import time
 import random
-import tempfile
 import multiprocessing as mp
 from typing import Any, Optional
 
 import torch
 import numpy as np
-import wandb
-from torch.optim.lr_scheduler import LambdaLR
-from ase.io import write as ase_write
 from einops import rearrange
 from lightning import Callback, LightningModule
 from lightning.pytorch.utilities import rank_zero_info
@@ -33,79 +28,6 @@ from src.original.models.loss.validation import (
 )
 from src.original.models.loss.utils import stratify_loss_by_time
 from src.original.module.flow import AtomFlowMatching
-from src.original.scripts.assemble import assemble
-
-
-# =============================================================================
-# Learning Rate Scheduler Helper Functions
-# =============================================================================
-
-def get_cosine_schedule_with_warmup(
-    optimizer: torch.optim.Optimizer,
-    num_warmup_steps: int,
-    num_training_steps: int,
-    min_lr_ratio: float = 0.0,
-    last_epoch: int = -1,
-) -> LambdaLR:
-    """Create a schedule with linear warmup and cosine annealing.
-
-    Args:
-        optimizer: The optimizer for which to schedule the learning rate.
-        num_warmup_steps: Number of warmup steps.
-        num_training_steps: Total number of training steps.
-        min_lr_ratio: Minimum learning rate as a ratio of the initial LR.
-        last_epoch: The index of last epoch when resuming training.
-
-    Returns:
-        LambdaLR scheduler with linear warmup and cosine annealing.
-    """
-    def lr_lambda(current_step: int) -> float:
-        # Linear warmup
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-
-        # Cosine annealing after warmup
-        progress = float(current_step - num_warmup_steps) / float(
-            max(1, num_training_steps - num_warmup_steps)
-        )
-        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
-
-        # Scale between min_lr_ratio and 1.0
-        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay
-
-    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
-
-
-def get_linear_schedule_with_warmup(
-    optimizer: torch.optim.Optimizer,
-    num_warmup_steps: int,
-    num_training_steps: int,
-    last_epoch: int = -1,
-) -> LambdaLR:
-    """Create a schedule with linear warmup and linear decay.
-
-    Args:
-        optimizer: The optimizer for which to schedule the learning rate.
-        num_warmup_steps: Number of warmup steps.
-        num_training_steps: Total number of training steps.
-        last_epoch: The index of last epoch when resuming training.
-
-    Returns:
-        LambdaLR scheduler with linear warmup and linear decay.
-    """
-    def lr_lambda(current_step: int) -> float:
-        # Linear warmup
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-
-        # Linear decay after warmup
-        return max(
-            0.0,
-            float(num_training_steps - current_step) /
-            float(max(1, num_training_steps - num_warmup_steps))
-        )
-
-    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
 
 
 class EffCatModule(LightningModule):
@@ -534,147 +456,6 @@ class EffCatModule(LightningModule):
         
         return_dict["ads_atom_types"] = batch["ref_ads_element"]
         self.validation_step_outputs.append(return_dict)
-
-    def _log_generated_structures_to_wandb(
-        self,
-        valid_outputs: list,
-        n_samples: int,
-        max_structures: int = 5,
-    ) -> None:
-        """
-        Log generated catalyst structures to W&B as 3D molecular visualizations.
-
-        Args:
-            valid_outputs: List of validation step outputs containing generated structures
-            n_samples: Number of samples per input (flow_samples)
-            max_structures: Maximum number of structures to log per epoch
-        """
-        if not self.logger or not hasattr(self.logger, 'experiment'):
-            rank_zero_info("| W&B logger not available, skipping structure logging.")
-            return
-
-        structures_logged = 0
-        molecules_to_log = []
-        temp_files = []  # Track temp files for cleanup after logging
-
-        for batch_idx, batch_output in enumerate(valid_outputs):
-            if structures_logged >= max_structures:
-                break
-
-            # Get data from batch output
-            sampled_prim_slab_coords = (
-                rearrange(
-                    batch_output["sampled_prim_slab_coords"],
-                    "(b m) n c -> b m n c",
-                    m=n_samples,
-                )
-                .cpu()
-                .numpy()
-            )
-            sampled_ads_coords = (
-                rearrange(
-                    batch_output["sampled_ads_coords"],
-                    "(b m) n c -> b m n c",
-                    m=n_samples,
-                )
-                .cpu()
-                .numpy()
-            )
-            sampled_lattices = (
-                rearrange(
-                    batch_output["sampled_lattices"],
-                    "(b m) c -> b m c",
-                    m=n_samples,
-                )
-                .cpu()
-                .numpy()
-            )
-            sampled_supercell_matrices = (
-                rearrange(
-                    batch_output["sampled_supercell_matrices"],
-                    "(b m) ... -> b m ...",
-                    m=n_samples,
-                )
-                .cpu()
-                .numpy()
-            )
-            sampled_scaling_factors = (
-                rearrange(
-                    batch_output["sampled_scaling_factors"],
-                    "(b m) -> b m",
-                    m=n_samples,
-                )
-                .cpu()
-                .numpy()
-            )
-            prim_slab_atom_types = batch_output["prim_slab_atom_types"].cpu().numpy()
-            ads_atom_types = batch_output["ads_atom_types"].cpu().numpy()
-            prim_slab_atom_mask = batch_output["prim_slab_atom_mask"].cpu().numpy().astype(bool)
-            ads_atom_mask = batch_output["ads_atom_mask"].cpu().numpy().astype(bool)
-
-            batch_size = sampled_prim_slab_coords.shape[0]
-
-            for i in range(batch_size):
-                if structures_logged >= max_structures:
-                    break
-
-                # Only log the first sample (sample_idx=0) for each batch item
-                sample_idx = 0
-
-                try:
-                    # Assemble the structure
-                    atoms, _ = assemble(
-                        generated_prim_slab_coords=sampled_prim_slab_coords[i, sample_idx],
-                        generated_ads_coords=sampled_ads_coords[i, sample_idx],
-                        generated_lattice=sampled_lattices[i, sample_idx],
-                        generated_supercell_matrix=sampled_supercell_matrices[i, sample_idx],
-                        generated_scaling_factor=sampled_scaling_factors[i, sample_idx],
-                        prim_slab_atom_types=prim_slab_atom_types[i],
-                        ads_atom_types=ads_atom_types[i],
-                        prim_slab_atom_mask=prim_slab_atom_mask[i],
-                        ads_atom_mask=ads_atom_mask[i],
-                    )
-
-                    # Write to temporary PDB file and log (W&B supports PDB, not XYZ)
-                    with tempfile.NamedTemporaryFile(
-                        mode='w', suffix='.pdb', delete=False
-                    ) as f:
-                        temp_path = f.name
-
-                    ase_write(temp_path, atoms, format='proteindatabank')
-                    temp_files.append(temp_path)  # Track for cleanup
-
-                    molecules_to_log.append(
-                        wandb.Molecule(
-                            temp_path,
-                            caption=f"Generated catalyst (epoch {self.current_epoch}, sample {structures_logged})"
-                        )
-                    )
-                    structures_logged += 1
-
-                except Exception as e:
-                    rank_zero_info(
-                        f"| WARNING: Failed to log structure {structures_logged}: {e}"
-                    )
-                    continue
-
-        # Log all molecules to W&B
-        if molecules_to_log:
-            try:
-                self.logger.experiment.log({
-                    "val/generated_structures": molecules_to_log,
-                    "epoch": self.current_epoch,
-                })
-                rank_zero_info(f"| Logged {len(molecules_to_log)} generated structures to W&B.")
-            except Exception as e:
-                rank_zero_info(f"| WARNING: Failed to log structures to W&B: {e}")
-
-        # Clean up temp files after logging
-        for temp_path in temp_files:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
 
     def on_validation_epoch_end(self) -> None:
         # NOTE: This hook is called on ALL ranks in DDP, but we only execute code on rank 0.
@@ -1153,16 +934,6 @@ class EffCatModule(LightningModule):
                 else:
                     self.log("val/avg_adsorption_energy", float("nan"), rank_zero_only=True)
 
-            # Log generated structures to W&B as 3D visualizations
-            log_structures = self.validation_args.get("log_structures_to_wandb", False)
-            if log_structures:
-                max_structures = self.validation_args.get("max_structures_to_log", 5)
-                self._log_generated_structures_to_wandb(
-                    valid_outputs=valid_outputs,
-                    n_samples=n_samples,
-                    max_structures=max_structures,
-                )
-
             # Reset metrics for next epoch
             self.val_prim_match_rate.reset()
             self.val_prim_rmsd.reset()
@@ -1238,87 +1009,13 @@ class EffCatModule(LightningModule):
                 raise e
 
     def configure_optimizers(self):
-        """Configure optimizer and learning rate scheduler.
-
-        Supports:
-        - AdamW optimizer with configurable betas
-        - Cosine warmup scheduler (linear warmup + cosine annealing)
-        - Linear warmup scheduler (linear warmup + linear decay)
-        - No scheduler (constant learning rate)
-        """
-        # Create optimizer
+        # TODO: Add af3 scheduler
         optimizer = torch.optim.AdamW(
             params=self.parameters(),
             lr=self.training_args["lr"],
-            weight_decay=self.training_args.get("weight_decay", 0.0),
-            betas=(
-                self.training_args.get("adam_beta1", 0.9),
-                self.training_args.get("adam_beta2", 0.999),
-            ),
+            weight_decay=self.training_args["weight_decay"],
         )
-
-        # Check if scheduler is configured
-        scheduler_config = self.training_args.get("scheduler", {})
-        scheduler_type = scheduler_config.get("type", "none") if scheduler_config else "none"
-
-        if scheduler_type == "none" or not scheduler_config:
-            rank_zero_info("| Using constant learning rate (no scheduler)")
-            return {"optimizer": optimizer}
-
-        # Calculate total training steps
-        # Note: estimated_stepping_batches accounts for accumulate_grad_batches and devices
-        total_steps = self.trainer.estimated_stepping_batches
-        rank_zero_info(f"| Total training steps: {total_steps}")
-
-        # Calculate warmup steps
-        warmup_epochs = scheduler_config.get("warmup_epochs")
-        if warmup_epochs is not None and warmup_epochs > 0:
-            # Calculate steps from epochs
-            steps_per_epoch = total_steps // self.trainer.max_epochs
-            warmup_steps = int(warmup_epochs * steps_per_epoch)
-            rank_zero_info(f"| Warmup: {warmup_epochs} epochs = {warmup_steps} steps")
-        else:
-            warmup_steps = scheduler_config.get("warmup_steps", 1000)
-            rank_zero_info(f"| Warmup: {warmup_steps} steps")
-
-        # Ensure warmup doesn't exceed total steps
-        warmup_steps = min(warmup_steps, total_steps - 1)
-
-        # Create scheduler based on type
-        if scheduler_type == "cosine_warmup":
-            min_lr_ratio = scheduler_config.get("min_lr_ratio", 0.01)
-            scheduler = get_cosine_schedule_with_warmup(
-                optimizer=optimizer,
-                num_warmup_steps=warmup_steps,
-                num_training_steps=total_steps,
-                min_lr_ratio=min_lr_ratio,
-            )
-            rank_zero_info(
-                f"| Using cosine warmup scheduler: "
-                f"warmup={warmup_steps}, total={total_steps}, min_lr_ratio={min_lr_ratio}"
-            )
-        elif scheduler_type == "linear_warmup":
-            scheduler = get_linear_schedule_with_warmup(
-                optimizer=optimizer,
-                num_warmup_steps=warmup_steps,
-                num_training_steps=total_steps,
-            )
-            rank_zero_info(
-                f"| Using linear warmup scheduler: "
-                f"warmup={warmup_steps}, total={total_steps}"
-            )
-        else:
-            rank_zero_info(f"| Unknown scheduler type: {scheduler_type}, using constant LR")
-            return {"optimizer": optimizer}
-
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",  # Update LR every step, not every epoch
-                "frequency": 1,
-            },
-        }
+        return {"optimizer": optimizer}
 
     def configure_callbacks(self) -> list[Callback]:
         """Configure model callbacks.
