@@ -75,6 +75,14 @@ model:
     # Adsorbate coordinate standardization parameters
     ads_coord_mean: [0.007402, -0.702398, 0.934607]
     ads_coord_std: [8.247430, 9.035212, 9.979235]
+    # Lattice normalization parameters (after unit conversion: nm, radians)
+    lattice_length_mean: [0.520062, 0.667951, 0.868349]  # nm
+    lattice_length_std: [0.203826, 0.309252, 0.414189]   # nm
+    lattice_angle_mean: [1.606148, 1.553209, 1.594014]   # radians
+    lattice_angle_std: [0.237190, 0.192798, 0.276900]    # radians
+    # Scaling factor normalization parameters
+    scaling_factor_mean: 3.422659
+    scaling_factor_std: 0.473453
 
   # Flow process arguments
   flow_process_args:
@@ -114,6 +122,15 @@ training:
   # Optimizer
   lr: 0.0001
   weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+
+  # Learning rate scheduler
+  scheduler:
+    type: "cosine_warmup"  # "none", "cosine_warmup", "linear_warmup"
+    warmup_steps: 1000  # Number of warmup steps (or use warmup_epochs)
+    warmup_epochs: null  # Alternative: warmup as fraction of epochs (overrides warmup_steps if set)
+    min_lr_ratio: 0.01  # Minimum LR as ratio of initial LR (for cosine annealing)
 
   # Checkpointing
   checkpoint:
@@ -142,6 +159,9 @@ validation:
     ltol: 0.3
     stol: 0.5
     angle_tol: 10.0
+  # W&B structure visualization
+  log_structures_to_wandb: true
+  max_structures_to_log: 5
 
 # Prediction configuration
 prediction:

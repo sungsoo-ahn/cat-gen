@@ -114,6 +114,15 @@ training:
   # Optimizer
   lr: 0.0001
   weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+
+  # Learning rate scheduler
+  scheduler:
+    type: "cosine_warmup"  # "none", "cosine_warmup", "linear_warmup"
+    warmup_steps: 1000  # Number of warmup steps (or use warmup_epochs)
+    warmup_epochs: null  # Alternative: warmup as fraction of epochs (overrides warmup_steps if set)
+    min_lr_ratio: 0.01  # Minimum LR as ratio of initial LR (for cosine annealing)
 
   # Checkpointing
   checkpoint:
@@ -142,6 +151,9 @@ validation:
     ltol: 0.3
     stol: 0.5
     angle_tol: 10.0
+  # W&B structure visualization
+  log_structures_to_wandb: true
+  max_structures_to_log: 5
 
 # Prediction configuration
 prediction:
