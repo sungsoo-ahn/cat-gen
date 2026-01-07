@@ -100,6 +100,15 @@ training:
 
   lr: 0.0001
   weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+
+  # Learning rate scheduler (disabled for quick testing)
+  scheduler:
+    type: "none"  # "none", "cosine_warmup", "linear_warmup"
+    warmup_steps: 10
+    warmup_epochs: null
+    min_lr_ratio: 0.01
 
   checkpoint:
     save_top_k: 1
