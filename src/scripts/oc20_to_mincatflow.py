@@ -49,6 +49,7 @@ def get_slab_params(mapping: dict, sid: int) -> dict | None:
         "miller_index": value.get("miller_index"),
         "shift": value.get("shift"),
         "top": value.get("top"),
+        "ads_id": value.get("ads_id"),
     }
 
 
@@ -155,8 +156,15 @@ def extract_from_lmdb(lmdb_path: str, index: int) -> dict | None:
         db.close()
 
 
-def process_to_mincatflow(data: dict, n_slab: int, n_vac: int) -> dict | None:
-    """Convert extracted data to MinCatFlow format with primitive slab."""
+def process_to_mincatflow(data: dict, n_slab: int, n_vac: int, ref_ads_pos_canonical: np.ndarray) -> dict | None:
+    """Convert extracted data to MinCatFlow format with primitive slab.
+
+    Args:
+        data: Extracted OC20 data
+        n_slab: Number of slab layers
+        n_vac: Number of vacuum layers
+        ref_ads_pos_canonical: Canonical reference adsorbate positions from adsorbates.pkl
+    """
     try:
         # Create ASE Atoms
         true_system = Atoms(
@@ -269,7 +277,8 @@ def process_to_mincatflow(data: dict, n_slab: int, n_vac: int) -> dict | None:
             "n_slab": n_slab,
             "n_vac": n_vac,
             "ads_atomic_numbers": final_adsorbate.numbers,
-            "ads_pos": final_adsorbate.positions,
+            "ads_pos": final_adsorbate.positions,  # Relaxed adsorbate positions
+            "ref_ads_pos": ref_ads_pos_canonical,  # Canonical reference positions from adsorbates.pkl
             "ref_energy": data['ref_energy'],
         }
     except Exception:
@@ -279,19 +288,22 @@ def process_to_mincatflow(data: dict, n_slab: int, n_vac: int) -> dict | None:
 # Global variables for worker processes
 _mapping = None
 _lmdb_path = None
+_adsorbates = None
 _slab_cache = {}
 
 
-def init_worker(mapping_path: str, lmdb_path: str):
+def init_worker(mapping_path: str, lmdb_path: str, adsorbates_path: str):
     """Initialize worker with shared data."""
-    global _mapping, _lmdb_path
+    global _mapping, _lmdb_path, _adsorbates
     _mapping = load_mapping(mapping_path)
     _lmdb_path = lmdb_path
+    with open(adsorbates_path, "rb") as f:
+        _adsorbates = pickle.load(f)
 
 
 def process_single(index: int) -> dict:
     """Process a single sample."""
-    global _mapping, _lmdb_path, _slab_cache
+    global _mapping, _lmdb_path, _adsorbates, _slab_cache
 
     result = {'index': index, 'status': 'error', 'data': None}
 
@@ -314,10 +326,21 @@ def process_single(index: int) -> dict:
 
     bulk_mpid = slab_params['bulk_mpid']
     miller_index = slab_params['miller_index']
+    ads_id = slab_params['ads_id']
 
     if miller_index is None:
         result['status'] = 'no_miller'
         return result
+
+    if ads_id is None:
+        result['status'] = 'no_ads_id'
+        return result
+
+    # Get canonical reference adsorbate positions from adsorbates.pkl
+    if ads_id not in _adsorbates:
+        result['status'] = 'ads_id_not_found'
+        return result
+    ref_ads_pos_canonical = _adsorbates[ads_id][0].get_positions()
 
     # Convert miller_index to tuple if needed
     if isinstance(miller_index, list):
@@ -338,7 +361,7 @@ def process_single(index: int) -> dict:
     n_slab, n_vac = layers
 
     # Convert to MinCatFlow format
-    mincatflow_data = process_to_mincatflow(data, n_slab, n_vac)
+    mincatflow_data = process_to_mincatflow(data, n_slab, n_vac, ref_ads_pos_canonical)
     if mincatflow_data is None:
         result['status'] = 'conversion_failed'
         return result
@@ -352,6 +375,8 @@ def main():
     parser = argparse.ArgumentParser(description="Convert OC20 to MinCatFlow LMDB")
     parser.add_argument("--lmdb-path", type=str, required=True, help="OC20 IS2RE LMDB path")
     parser.add_argument("--mapping-path", type=str, required=True, help="oc20_data_mapping.pkl path")
+    parser.add_argument("--adsorbates-path", type=str, default="resources/adsorbates.pkl",
+                        help="adsorbates.pkl path from fairchem")
     parser.add_argument("--output-path", type=str, required=True, help="Output LMDB path")
     parser.add_argument("--start", type=int, default=0, help="Start index")
     parser.add_argument("--end", type=int, default=None, help="End index")
@@ -389,7 +414,7 @@ def main():
     out_idx = 0
 
     # Process in parallel
-    with Pool(num_workers, initializer=init_worker, initargs=(args.mapping_path, args.lmdb_path)) as pool:
+    with Pool(num_workers, initializer=init_worker, initargs=(args.mapping_path, args.lmdb_path, args.adsorbates_path)) as pool:
         for result in tqdm(pool.imap(process_single, indices, chunksize=args.chunksize),
                           total=len(indices), desc="Processing"):
             if result['status'] == 'success':
