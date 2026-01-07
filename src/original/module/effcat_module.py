@@ -1,6 +1,7 @@
 import os
 import gc
 import json
+import math
 import time
 import random
 import tempfile
@@ -10,6 +11,7 @@ from typing import Any, Optional
 import torch
 import numpy as np
 import wandb
+from torch.optim.lr_scheduler import LambdaLR
 from ase.io import write as ase_write
 from einops import rearrange
 from lightning import Callback, LightningModule
@@ -32,6 +34,78 @@ from src.original.models.loss.validation import (
 from src.original.models.loss.utils import stratify_loss_by_time
 from src.original.module.flow import AtomFlowMatching
 from src.original.scripts.assemble import assemble
+
+
+# =============================================================================
+# Learning Rate Scheduler Helper Functions
+# =============================================================================
+
+def get_cosine_schedule_with_warmup(
+    optimizer: torch.optim.Optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    min_lr_ratio: float = 0.0,
+    last_epoch: int = -1,
+) -> LambdaLR:
+    """Create a schedule with linear warmup and cosine annealing.
+
+    Args:
+        optimizer: The optimizer for which to schedule the learning rate.
+        num_warmup_steps: Number of warmup steps.
+        num_training_steps: Total number of training steps.
+        min_lr_ratio: Minimum learning rate as a ratio of the initial LR.
+        last_epoch: The index of last epoch when resuming training.
+
+    Returns:
+        LambdaLR scheduler with linear warmup and cosine annealing.
+    """
+    def lr_lambda(current_step: int) -> float:
+        # Linear warmup
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+
+        # Cosine annealing after warmup
+        progress = float(current_step - num_warmup_steps) / float(
+            max(1, num_training_steps - num_warmup_steps)
+        )
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        # Scale between min_lr_ratio and 1.0
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
+
+
+def get_linear_schedule_with_warmup(
+    optimizer: torch.optim.Optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    last_epoch: int = -1,
+) -> LambdaLR:
+    """Create a schedule with linear warmup and linear decay.
+
+    Args:
+        optimizer: The optimizer for which to schedule the learning rate.
+        num_warmup_steps: Number of warmup steps.
+        num_training_steps: Total number of training steps.
+        last_epoch: The index of last epoch when resuming training.
+
+    Returns:
+        LambdaLR scheduler with linear warmup and linear decay.
+    """
+    def lr_lambda(current_step: int) -> float:
+        # Linear warmup
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+
+        # Linear decay after warmup
+        return max(
+            0.0,
+            float(num_training_steps - current_step) /
+            float(max(1, num_training_steps - num_warmup_steps))
+        )
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
 
 
 class EffCatModule(LightningModule):
@@ -1158,13 +1232,87 @@ class EffCatModule(LightningModule):
                 raise e
 
     def configure_optimizers(self):
-        # TODO: Add af3 scheduler
+        """Configure optimizer and learning rate scheduler.
+
+        Supports:
+        - AdamW optimizer with configurable betas
+        - Cosine warmup scheduler (linear warmup + cosine annealing)
+        - Linear warmup scheduler (linear warmup + linear decay)
+        - No scheduler (constant learning rate)
+        """
+        # Create optimizer
         optimizer = torch.optim.AdamW(
             params=self.parameters(),
             lr=self.training_args["lr"],
-            weight_decay=self.training_args["weight_decay"],
+            weight_decay=self.training_args.get("weight_decay", 0.0),
+            betas=(
+                self.training_args.get("adam_beta1", 0.9),
+                self.training_args.get("adam_beta2", 0.999),
+            ),
         )
-        return {"optimizer": optimizer}
+
+        # Check if scheduler is configured
+        scheduler_config = self.training_args.get("scheduler", {})
+        scheduler_type = scheduler_config.get("type", "none") if scheduler_config else "none"
+
+        if scheduler_type == "none" or not scheduler_config:
+            rank_zero_info("| Using constant learning rate (no scheduler)")
+            return {"optimizer": optimizer}
+
+        # Calculate total training steps
+        # Note: estimated_stepping_batches accounts for accumulate_grad_batches and devices
+        total_steps = self.trainer.estimated_stepping_batches
+        rank_zero_info(f"| Total training steps: {total_steps}")
+
+        # Calculate warmup steps
+        warmup_epochs = scheduler_config.get("warmup_epochs")
+        if warmup_epochs is not None and warmup_epochs > 0:
+            # Calculate steps from epochs
+            steps_per_epoch = total_steps // self.trainer.max_epochs
+            warmup_steps = int(warmup_epochs * steps_per_epoch)
+            rank_zero_info(f"| Warmup: {warmup_epochs} epochs = {warmup_steps} steps")
+        else:
+            warmup_steps = scheduler_config.get("warmup_steps", 1000)
+            rank_zero_info(f"| Warmup: {warmup_steps} steps")
+
+        # Ensure warmup doesn't exceed total steps
+        warmup_steps = min(warmup_steps, total_steps - 1)
+
+        # Create scheduler based on type
+        if scheduler_type == "cosine_warmup":
+            min_lr_ratio = scheduler_config.get("min_lr_ratio", 0.01)
+            scheduler = get_cosine_schedule_with_warmup(
+                optimizer=optimizer,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=total_steps,
+                min_lr_ratio=min_lr_ratio,
+            )
+            rank_zero_info(
+                f"| Using cosine warmup scheduler: "
+                f"warmup={warmup_steps}, total={total_steps}, min_lr_ratio={min_lr_ratio}"
+            )
+        elif scheduler_type == "linear_warmup":
+            scheduler = get_linear_schedule_with_warmup(
+                optimizer=optimizer,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=total_steps,
+            )
+            rank_zero_info(
+                f"| Using linear warmup scheduler: "
+                f"warmup={warmup_steps}, total={total_steps}"
+            )
+        else:
+            rank_zero_info(f"| Unknown scheduler type: {scheduler_type}, using constant LR")
+            return {"optimizer": optimizer}
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",  # Update LR every step, not every epoch
+                "frequency": 1,
+            },
+        }
 
     def configure_callbacks(self) -> list[Callback]:
         """Configure model callbacks.
