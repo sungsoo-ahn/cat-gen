@@ -156,11 +156,14 @@ class EffCatModule(LightningModule):
         original_n = feats["prim_slab_cart_coords"].shape[1]
 
         # Sample number of atoms from histogram
+        # Normalize probabilities to ensure they sum exactly to 1.0 (floating-point fix)
         n_atoms_indices = np.arange(len(self.n_prim_slab_atoms_hist))
+        probs = np.array(self.n_prim_slab_atoms_hist, dtype=np.float64)
+        probs = probs / probs.sum()
         sampled_n_atoms = np.random.choice(
             n_atoms_indices,
             size=batch_size * multiplicity,
-            p=self.n_prim_slab_atoms_hist,
+            p=probs,
             replace=True
         ).tolist()
 
