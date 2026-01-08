@@ -11,23 +11,17 @@ from src.catgen.models.layers import (
     AtomAttentionEncoder,
     AtomAttentionDecoder,
     TokenTransformer,
-    NUM_ELEMENTS,
-    MASK_TOKEN_INDEX,
-    NUM_ELEMENTS_WITH_MASK,
 )
 from src.catgen.models.utils import LinearNoBias, center_random_augmentation, default
 from src.catgen.scripts.refine_sc_mat import refine_sc_mat
-
-
-# =============================================================================
-# Constants
-# =============================================================================
-
-# Small epsilon for numerical stability in flow computation.
-# Used in denominator (1 - t + eps) to prevent division by zero as t -> 1.
-# Value chosen to be small enough not to affect results but large enough
-# to prevent numerical overflow (1e-5 gives ~10^5 max magnitude).
-FLOW_EPSILON = 1e-5
+from src.catgen.constants import (
+    NUM_ELEMENTS,
+    MASK_TOKEN_INDEX,
+    NUM_ELEMENTS_WITH_MASK,
+    FLOW_EPSILON,
+    ANGLE_LOSS_SCALE,
+    EPS_NUMERICAL,
+)
 
 
 # =============================================================================
@@ -462,7 +456,7 @@ class AtomFlowMatching(Module):
         # Compute true center and relative for loss computation
         ads_mask_expanded = ads_mask.repeat_interleave(multiplicity, 0)
         ads_mask_sum = ads_mask_expanded.sum(dim=1, keepdim=True)  # (B*mult, 1)
-        true_ads_center = (ads_coords * ads_mask_expanded[..., None]).sum(dim=1) / (ads_mask_sum + 1e-8)  # (B*mult, 3)
+        true_ads_center = (ads_coords * ads_mask_expanded[..., None]).sum(dim=1) / (ads_mask_sum + EPS_NUMERICAL)  # (B*mult, 3)
         true_ads_rel = ads_coords - true_ads_center.unsqueeze(1)  # (B*mult, M, 3)
 
         out_dict = dict(
@@ -542,7 +536,7 @@ class AtomFlowMatching(Module):
 
         # Relative position loss (these are typically small, bounded values)
         ads_rel_loss = loss_fn(pred_ads_rel, true_ads_rel, reduction="none")
-        ads_rel_loss = (ads_rel_loss * ads_mask[..., None]).sum(dim=(1, 2)) / (ads_mask_sum.squeeze(-1) + 1e-8)
+        ads_rel_loss = (ads_rel_loss * ads_mask[..., None]).sum(dim=(1, 2)) / (ads_mask_sum.squeeze(-1) + EPS_NUMERICAL)
 
         # Handle case where all adsorbate atoms are masked (no adsorbate)
         ads_mask_sum_flat = ads_mask_sum.squeeze(-1)
@@ -564,10 +558,9 @@ class AtomFlowMatching(Module):
         # Normalize angle loss by expected variance to bring it to similar scale as other losses
         # Angles range ~60-120 degrees, so variance ~300 for uniform distribution
         # This makes angle_loss comparable to coord_loss in magnitude
-        ANGLE_SCALE = 300.0  # Expected variance of angles in degrees^2
         angle_loss = loss_fn(
             pred_lattice[:, 3:], true_lattice[:, 3:], reduction="none"
-        ).mean(dim=1) / ANGLE_SCALE
+        ).mean(dim=1) / ANGLE_LOSS_SCALE
 
         # Loss for supercell matrix (raw space)
         true_supercell_matrix = out_dict["aligned_true_supercell_matrix"]  # (B, 3, 3) raw space

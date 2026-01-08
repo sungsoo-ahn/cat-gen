@@ -28,9 +28,7 @@ from tqdm import tqdm
 from pymatgen.core import Lattice
 
 from src.catgen.data.pad import pad_to_max
-
-# Default value for missing reference energy (NaN allows downstream detection)
-MISSING_REF_ENERGY = float("nan")
+from src.catgen.constants import MISSING_REF_ENERGY, PAD_VALUE
 
 
 def cell_to_lattice_params(cell: np.ndarray) -> np.ndarray:
@@ -287,13 +285,11 @@ def collate_fn_with_dynamic_padding(
 
     return {
         # Padded prim_slab data
-        "prim_slab_atomic_numbers": prim_slab_atomic_numbers,  # [B, n_prim_slab_max]
         "ref_prim_slab_element": prim_slab_atomic_numbers,  # [B, n_prim_slab_max]
         "n_prim_slab_atoms": torch.tensor(
             [len(t) for t in prim_slab_numbers_list], dtype=torch.long
         ),  # [B]
         # Padded adsorbate data
-        "adsorbate_atomic_numbers": adsorbate_atomic_numbers,  # [B, n_adsorbate_max]
         "adsorbate_pos": adsorbate_pos,  # [B, n_adsorbate_max, 3]
         "ref_ads_pos": ref_ads_pos,  # [B, n_adsorbate_max, 3]
         "adsorbate_mask": adsorbate_mask,  # [B, n_adsorbate_max]

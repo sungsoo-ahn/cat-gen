@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Protocol
 import torch
 from torch.distributions import LogNormal, Uniform
 
+from src.catgen.constants import EPS_NUMERICAL
+
 
 class PriorSampler(Protocol):
     """Protocol for prior samplers used in flow matching."""
@@ -159,7 +161,7 @@ class CatPriorSampler:
         """
         mean = self.supercell_mean.to(supercell_matrix.device, supercell_matrix.dtype)
         std = self.supercell_std.to(supercell_matrix.device, supercell_matrix.dtype)
-        return (supercell_matrix - mean) / (std + 1e-8)
+        return (supercell_matrix - mean) / (std + EPS_NUMERICAL)
 
     def denormalize_supercell(self, supercell_matrix_normalized: torch.Tensor) -> torch.Tensor:
         """Denormalize supercell matrix back to original space.
@@ -185,7 +187,7 @@ class CatPriorSampler:
         """
         mean = self.prim_slab_coord_mean.to(coords.device, coords.dtype)
         std = self.prim_slab_coord_std.to(coords.device, coords.dtype)
-        return (coords - mean) / (std + 1e-8)
+        return (coords - mean) / (std + EPS_NUMERICAL)
 
     def denormalize_prim_slab_coords(self, coords_normalized: torch.Tensor) -> torch.Tensor:
         """Destandardize prim_slab coordinates back to original space.
@@ -211,7 +213,7 @@ class CatPriorSampler:
         """
         mean = self.ads_coord_mean.to(coords.device, coords.dtype)
         std = self.ads_coord_std.to(coords.device, coords.dtype)
-        return (coords - mean) / (std + 1e-8)
+        return (coords - mean) / (std + EPS_NUMERICAL)
 
     def denormalize_ads_coords(self, coords_normalized: torch.Tensor) -> torch.Tensor:
         """Destandardize adsorbate coordinates back to original space.
@@ -235,7 +237,7 @@ class CatPriorSampler:
         Returns:
             (B, 3) normalized angles (zero mean, unit variance)
         """
-        return (angles - self.angle_mean) / (self.angle_std + 1e-8)
+        return (angles - self.angle_mean) / (self.angle_std + EPS_NUMERICAL)
 
     def denormalize_angles(self, angles_normalized: torch.Tensor) -> torch.Tensor:
         """Denormalize lattice angles back to degrees.

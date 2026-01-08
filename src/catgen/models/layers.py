@@ -9,15 +9,14 @@ from torch.nn import Module
 
 from src.catgen.models.utils import LinearNoBias
 from src.catgen.models.transformers import DiT, PositionalEmbedder
+from src.catgen.constants import (
+    NUM_ELEMENTS,
+    MASK_TOKEN_INDEX,
+    NUM_ELEMENTS_WITH_MASK,
+    EPS_NUMERICAL,
+)
 
 logger = logging.getLogger(__name__)
-
-# Number of elements for one-hot encoding (covers most elements in periodic table)
-NUM_ELEMENTS = 100
-
-# Discrete Flow Matching constants (for dng=True mode)
-MASK_TOKEN_INDEX = 0  # Mask token index (used as prior in DFM)
-NUM_ELEMENTS_WITH_MASK = NUM_ELEMENTS + 1  # 101 (0=MASK, 1-100=elements)
 
 
 def _clamp_element_indices(
@@ -362,7 +361,7 @@ class AtomAttentionDecoder(Module):
 
         # Adsorbate center prediction (global pooling of adsorbate atoms)
         num_ads_atoms = ads_mask.sum(dim=1, keepdim=True)  # (B*mult, 1)
-        x_ads_global = torch.sum(x_ads * ads_mask[..., None], dim=1) / (num_ads_atoms + 1e-8)  # (B*mult, atom_s)
+        x_ads_global = torch.sum(x_ads * ads_mask[..., None], dim=1) / (num_ads_atoms + EPS_NUMERICAL)  # (B*mult, atom_s)
         ads_center_update = self.feats_to_ads_center(x_ads_global)  # (B*mult, 3)
 
         # Adsorbate relative position prediction (per-atom)
@@ -373,7 +372,7 @@ class AtomAttentionDecoder(Module):
 
         # Global pooling (use prim_slab atoms only)
         num_prim_slab_atoms = prim_slab_mask.sum(dim=1, keepdim=True)  # (B*mult, 1)
-        x_global = torch.sum(x_prim_slab * prim_slab_mask[..., None], dim=1) / (num_prim_slab_atoms + 1e-8)
+        x_global = torch.sum(x_prim_slab * prim_slab_mask[..., None], dim=1) / (num_prim_slab_atoms + EPS_NUMERICAL)
 
         # Lattice prediction
         l_update = self.feats_to_lattice(x_global)  # (B*mult, 6)
