@@ -3,8 +3,7 @@
 Generates new catalyst structures using trained flow matching models.
 
 Usage:
-    python src/scripts/generate.py configs/original/test.yaml --checkpoint path/to/checkpoint.ckpt
-    python src/scripts/generate.py configs/reimplementation/test.yaml --checkpoint path/to/checkpoint.ckpt
+    python src/scripts/generate.py configs/default/test.yaml --checkpoint path/to/checkpoint.ckpt
 """
 
 import argparse
@@ -26,14 +25,10 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def create_datamodule(config: dict, code_version: str):
-    """Create data module based on code version."""
+def create_datamodule(config: dict):
+    """Create data module."""
     from omegaconf import DictConfig
-
-    if code_version == "original":
-        from src.original.data.datamodule import LMDBDataModule
-    else:
-        from src.reimplementation.data.datamodule import LMDBDataModule
+    from src.catgen.data.datamodule import LMDBDataModule
 
     # Convert dicts to DictConfig for attribute access
     batch_size = DictConfig(config["data"]["batch_size"])
@@ -49,12 +44,9 @@ def create_datamodule(config: dict, code_version: str):
     )
 
 
-def load_model(config: dict, checkpoint_path: str, code_version: str):
+def load_model(checkpoint_path: str):
     """Load model from checkpoint."""
-    if code_version == "original":
-        from src.original.module.effcat_module import EffCatModule
-    else:
-        from src.reimplementation.module.effcat_module import EffCatModule
+    from src.catgen.module.effcat_module import EffCatModule
 
     # Load model from checkpoint
     model = EffCatModule.load_from_checkpoint(
@@ -130,10 +122,10 @@ def run_generation(
     return samples, batch, generation_time
 
 
-def print_results(samples: dict, batch: dict, generation_time: float, code_version: str):
+def print_results(samples: dict, batch: dict, generation_time: float):
     """Print generation results."""
     print(f"\n{'='*60}")
-    print(f"Generation Results ({code_version})")
+    print("Generation Results")
     print(f"{'='*60}")
     print(f"Generation time: {generation_time:.3f}s")
     print(f"Samples generated: {samples['sampled_prim_slab_coords'].shape[0]}")
@@ -193,17 +185,14 @@ def main(config_path: str, checkpoint_path: str, num_samples: int, sampling_step
     print(f"Loading config from: {config_path}")
     config = load_config(config_path)
 
-    code_version = config.get("code_version", "original")
-    print(f"Code version: {code_version}")
-
     print(f"\nLoading checkpoint from: {checkpoint_path}")
-    model = load_model(config, checkpoint_path, code_version)
+    model = load_model(checkpoint_path)
 
     if torch.cuda.is_available():
         model = model.cuda()
 
     print("\nCreating data module...")
-    datamodule = create_datamodule(config, code_version)
+    datamodule = create_datamodule(config)
 
     samples, batch, generation_time = run_generation(
         model=model,
@@ -213,7 +202,7 @@ def main(config_path: str, checkpoint_path: str, num_samples: int, sampling_step
         seed=seed,
     )
 
-    stats = print_results(samples, batch, generation_time, code_version)
+    stats = print_results(samples, batch, generation_time)
     return stats
 
 

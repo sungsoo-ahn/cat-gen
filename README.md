@@ -17,7 +17,6 @@ The model uses **flow matching** - a diffusion-based generative approach that le
 - Flow matching with Diffusion Transformer (DiT) backbone
 - Dynamic Nuclear Graph (DNG) mode for element prediction
 - Support for OC20 dataset processing
-- Parallel original and reimplementation for reproducibility comparison
 - WandB integration for experiment tracking
 - PyTorch Lightning training framework
 
@@ -61,14 +60,11 @@ The processed data contains ~460K adsorbate+catalyst structures from DFT calcula
 ### 2. Train a Model
 
 ```bash
-# Train with full config (1000 epochs, full model)
-bash scripts/training/run_original.sh
-
-# Or train reimplementation (identical results)
-bash scripts/training/run_reimpl.sh
+# Train with full config
+bash scripts/training/run_train.sh
 
 # Quick test run (2 epochs, small model, uses processed OC20 data)
-PYTHONPATH=. uv run python src/scripts/train_original.py configs/original/test.yaml
+PYTHONPATH=. uv run python src/scripts/train.py configs/default/test.yaml
 ```
 
 **Training modes** (set in config):
@@ -80,8 +76,8 @@ PYTHONPATH=. uv run python src/scripts/train_original.py configs/original/test.y
 ```bash
 # De novo generation (with DNG mode - predicts elements)
 PYTHONPATH=. uv run python src/scripts/generate.py \
-    configs/original/test.yaml \
-    --checkpoint data/original/test_wandb/checkpoints/last.ckpt \
+    configs/default/test.yaml \
+    --checkpoint data/catgen/test_wandb/checkpoints/last.ckpt \
     --num_samples 10 \
     --sampling_steps 50
 
@@ -94,7 +90,7 @@ PYTHONPATH=. uv run python src/scripts/generate.py \
 ```
 cat-gen/
 ├── src/                          # Python source code
-│   ├── original/                 # Original MinCatFlow implementation
+│   ├── catgen/                   # MinCatFlow implementation
 │   │   ├── data/                 # Data loading and processing
 │   │   ├── models/               # Neural network architectures
 │   │   │   ├── layers.py         # Encoder/Decoder layers
@@ -103,21 +99,16 @@ cat-gen/
 │   │   └── module/               # PyTorch Lightning modules
 │   │       ├── effcat_module.py  # Main training module
 │   │       └── flow.py           # Flow matching logic
-│   ├── reimplementation/         # Reimplemented version (for reproducibility)
 │   ├── scripts/                  # Entry point scripts
-│   │   ├── train_original.py     # Training script (original)
-│   │   ├── train_reimpl.py       # Training script (reimplementation)
+│   │   ├── train.py              # Training script
 │   │   ├── generate.py           # De novo generation script
 │   │   └── oc20_to_mincatflow.py # OC20 to MinCatFlow conversion
 │   ├── helpers.py                # Utility functions
 │   └── utils.py                  # Common utilities
 ├── configs/                      # YAML configuration files
-│   ├── original/
-│   │   ├── default.yaml          # Full training config
-│   │   └── test.yaml             # Quick test config
-│   └── reimplementation/
-│       ├── default.yaml
-│       └── test.yaml
+│   └── default/
+│       ├── default.yaml          # Full training config
+│       └── test.yaml             # Quick test config
 ├── scripts/                      # Bash wrapper scripts
 │   ├── data/                     # Data processing scripts
 │   └── training/                 # Training scripts
@@ -286,11 +277,7 @@ During training, the following metrics are computed:
 
 ## Reproducibility
 
-This repository contains two parallel implementations:
-- `src/original/` - Reference implementation
-- `src/reimplementation/` - Verified reimplementation
-
-Both produce **identical results** with the same random seed, confirming reproducibility.
+This repository uses fixed random seeds for reproducible training. Set the same seed in your config to reproduce results exactly.
 
 ## Dependencies
 

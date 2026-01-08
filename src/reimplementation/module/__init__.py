@@ -1,1 +1,0 @@
-"""Module components for EfficientCatGen."""

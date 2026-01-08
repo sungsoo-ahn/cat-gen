@@ -169,7 +169,7 @@ This project uses git worktrees for parallel development by multiple agents.
 /home/sungsoo/code/cat-gen-agent-reimpl-2    (agent-reimpl-2 branch)
 ```
 
-Both agent worktrees are for improving the reimplementation. The original implementation should NOT be modified.
+Agent worktrees are used for parallel development of improvements to the codebase.
 
 ### Before Starting Work
 Always sync with main first:
