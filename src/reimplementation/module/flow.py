@@ -537,10 +537,8 @@ class AtomFlowMatching(Module):
         ads_mask = feats["ads_atom_pad_mask"].repeat_interleave(multiplicity, 0)
         ads_mask_sum = ads_mask.sum(dim=1, keepdim=True)  # (B*mult, 1)
 
-        # Center loss (normalized by coordinate std for consistent scale)
-        # Use ads_coord normalization std (~9 Angstrom) to normalize center loss
-        ADS_CENTER_SCALE = 81.0  # ~9^2, approximate variance of ads center positions
-        ads_center_loss = loss_fn(pred_ads_center, true_ads_center, reduction="none").mean(dim=1) / ADS_CENTER_SCALE
+        # Center loss (raw space, no normalization to match original implementation)
+        ads_center_loss = loss_fn(pred_ads_center, true_ads_center, reduction="none").mean(dim=1)
 
         # Relative position loss (these are typically small, bounded values)
         ads_rel_loss = loss_fn(pred_ads_rel, true_ads_rel, reduction="none")
@@ -601,7 +599,7 @@ class AtomFlowMatching(Module):
         
         check_dict = {}
         with torch.no_grad():
-            current_det = torch.det(torch.round(out_dict["denoised_supercell_matrix"]))
+            current_det = torch.det(torch.round(out_dict["denoised_supercell_matrix"]).float())
             check_dict["supercell_matrix_det_min"] = current_det.min()
             
             invalid_ratio = (current_det < 0.0).float().mean()

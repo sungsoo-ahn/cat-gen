@@ -24,6 +24,7 @@ from src.original.models.loss.validation import (
     find_best_match_rmsd_slab,
     compute_structural_validity_single,
     compute_prim_structural_validity_single,
+    compute_comprehensive_validity_single,
     get_uma_calculator,
 )
 from src.original.models.loss.utils import stratify_loss_by_time
@@ -73,6 +74,8 @@ class EffCatModule(LightningModule):
         self.val_adsorption_energy = MeanMetric(sync_on_compute=False)
         self.val_structural_validity = MeanMetric(sync_on_compute=False)
         self.val_prim_structural_validity = MeanMetric(sync_on_compute=False)
+        self.val_smact_validity = MeanMetric(sync_on_compute=False)
+        self.val_crystal_validity = MeanMetric(sync_on_compute=False)
         self.validation_step_outputs = []
         
         # UMA calculator for adsorption energy (lazy initialization)
@@ -252,6 +255,10 @@ class EffCatModule(LightningModule):
                     feats["ads_atom_to_token"] = feats["ads_atom_to_token"].repeat_interleave(multiplicity_flow_sample, 0)
                 if "ads_cart_coords" in feats:
                     feats["ads_cart_coords"] = feats["ads_cart_coords"].repeat_interleave(multiplicity_flow_sample, 0)
+                if "ads_center" in feats:
+                    feats["ads_center"] = feats["ads_center"].repeat_interleave(multiplicity_flow_sample, 0)
+                if "ads_rel_pos" in feats:
+                    feats["ads_rel_pos"] = feats["ads_rel_pos"].repeat_interleave(multiplicity_flow_sample, 0)
                 if "ads_atom_pad_mask" in feats:
                     feats["ads_atom_pad_mask"] = feats["ads_atom_pad_mask"].repeat_interleave(multiplicity_flow_sample, 0)
                 if "ads_token_pad_mask" in feats:
@@ -325,11 +332,14 @@ class EffCatModule(LightningModule):
         )
 
         # Calculate total weighted loss
+        # Support both old (ads_coord_loss) and new (ads_center_loss + ads_rel_pos_loss) formats
+        ads_center_weight = self.training_args.get("ads_center_loss_weight", 1.0)
+        ads_rel_pos_weight = self.training_args.get("ads_rel_pos_loss_weight", 1.0)
         total_loss = (
             self.training_args["prim_slab_coord_loss_weight"]
             * flow_loss_dict["prim_slab_coord_loss"].mean()
-            + self.training_args["ads_coord_loss_weight"]
-            * flow_loss_dict["ads_coord_loss"].mean()
+            + ads_center_weight * flow_loss_dict["ads_center_loss"].mean()
+            + ads_rel_pos_weight * flow_loss_dict["ads_rel_pos_loss"].mean()
             + self.training_args["length_loss_weight"]
             * flow_loss_dict["length_loss"].mean()
             + self.training_args["angle_loss_weight"]
@@ -759,49 +769,72 @@ class EffCatModule(LightningModule):
                 else:
                     self.val_prim_structural_validity.update(0.0)
 
-            # Execute slab structural validity tasks in parallel (always computed)
-            rank_zero_info(f"| Computing slab structural validity for {len(slab_validity_tasks)} structures (workers={num_workers})...")
-            slab_validity_results_per_item = []
+            # Execute comprehensive validity tasks in parallel (structural + SMACT + crystal)
+            rank_zero_info(f"| Computing comprehensive validity for {len(slab_validity_tasks)} structures (workers={num_workers})...")
+            comprehensive_validity_results_per_item = []
             with ProcessPool(
                 max_workers=num_workers, context=mp.get_context("spawn")
             ) as pool:
                 future_map = {
-                    pool.schedule(compute_structural_validity_single, args=(task,)): task
+                    pool.schedule(compute_comprehensive_validity_single, args=(task,)): task
                     for task in slab_validity_tasks
                 }
 
                 for future in tqdm(
-                    future_map, 
-                    desc="Slab structural validity", 
+                    future_map,
+                    desc="Comprehensive validity",
                     unit="struct",
                     total=len(slab_validity_tasks),
                     leave=False,
                 ):
                     try:
                         result = future.result(timeout=timeout_seconds)
-                        slab_validity_results_per_item.append(result)
+                        comprehensive_validity_results_per_item.append(result)
                     except PebbleTimeoutError:
                         future.cancel()
                         rank_zero_info(
-                            f"| WARNING: A slab structural validity task timed out. Skipping."
+                            f"| WARNING: A comprehensive validity task timed out. Skipping."
                         )
-                        slab_validity_results_per_item.append([False] * n_samples)
+                        # Return default dict for each sample
+                        comprehensive_validity_results_per_item.append([
+                            {"basic_valid": False, "structural_valid": False, "smact_valid": False, "crystal_valid": False}
+                            for _ in range(n_samples)
+                        ])
                     except Exception as e:
                         future.cancel()
                         rank_zero_info(
-                            f"| WARNING: A slab validity task failed with an exception: {e}"
+                            f"| WARNING: A comprehensive validity task failed with an exception: {e}"
                         )
-                        slab_validity_results_per_item.append([False] * n_samples)
-            
-            rank_zero_info(f"| Slab structural validity computation completed.")
+                        comprehensive_validity_results_per_item.append([
+                            {"basic_valid": False, "structural_valid": False, "smact_valid": False, "crystal_valid": False}
+                            for _ in range(n_samples)
+                        ])
 
-            # Compute slab structural validity rate (always computed)
+            rank_zero_info(f"| Comprehensive validity computation completed.")
+
+            # Process comprehensive validity results
             # Count as valid if at least one sample is valid (consistent with prim/slab RMSD)
-            for result_list in slab_validity_results_per_item:
-                if any(result_list):
+            for result_list in comprehensive_validity_results_per_item:
+                # Structural validity (basic + width/height)
+                structural_valid_list = [r.get("basic_valid", False) and r.get("structural_valid", False) for r in result_list]
+                if any(structural_valid_list):
                     self.val_structural_validity.update(1.0)
                 else:
                     self.val_structural_validity.update(0.0)
+
+                # SMACT validity
+                smact_valid_list = [r.get("smact_valid", False) for r in result_list]
+                if any(smact_valid_list):
+                    self.val_smact_validity.update(1.0)
+                else:
+                    self.val_smact_validity.update(0.0)
+
+                # Crystal validity
+                crystal_valid_list = [r.get("crystal_valid", False) for r in result_list]
+                if any(crystal_valid_list):
+                    self.val_crystal_validity.update(1.0)
+                else:
+                    self.val_crystal_validity.update(0.0)
 
             # Execute adsorption energy tasks in main process (reuse calculator)
             # NOTE: Adsorption computation is disabled by default in DDP due to long runtime
@@ -922,7 +955,21 @@ class EffCatModule(LightningModule):
                 self.val_structural_validity.compute() if self.val_structural_validity.update_count > 0 else float("nan"),
                 rank_zero_only=True,
             )
-            
+
+            # Log SMACT validity
+            self.log(
+                "val/smact_validity_rate",
+                self.val_smact_validity.compute() if self.val_smact_validity.update_count > 0 else float("nan"),
+                rank_zero_only=True,
+            )
+
+            # Log crystal validity
+            self.log(
+                "val/crystal_validity_rate",
+                self.val_crystal_validity.compute() if self.val_crystal_validity.update_count > 0 else float("nan"),
+                rank_zero_only=True,
+            )
+
             # Log adsorption energy (only if computed)
             if compute_adsorption:
                 if self.val_adsorption_energy.update_count > 0:
@@ -942,6 +989,8 @@ class EffCatModule(LightningModule):
             self.val_adsorption_energy.reset()
             self.val_structural_validity.reset()
             self.val_prim_structural_validity.reset()
+            self.val_smact_validity.reset()
+            self.val_crystal_validity.reset()
             self.validation_step_outputs.clear()  # free memory
 
     def test_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
@@ -1009,13 +1058,31 @@ class EffCatModule(LightningModule):
                 raise e
 
     def configure_optimizers(self):
-        # TODO: Add af3 scheduler
         optimizer = torch.optim.AdamW(
             params=self.parameters(),
             lr=self.training_args["lr"],
             weight_decay=self.training_args["weight_decay"],
         )
-        return {"optimizer": optimizer}
+
+        # Learning rate scheduler with warm up only
+        warmup_steps = self.training_args.get("warmup_steps", 10000)
+
+        # Linear warm up scheduler (lr increases from lr*0.01 to lr, then stays constant)
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=0.01,
+            end_factor=1.0,
+            total_iters=warmup_steps
+        )
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",  # Update lr at every step
+                "frequency": 1,
+            }
+        }
 
     def configure_callbacks(self) -> list[Callback]:
         """Configure model callbacks.

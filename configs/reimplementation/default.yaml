@@ -20,9 +20,9 @@ data:
   val_lmdb_path: "dataset/val_id/dataset.lmdb"
   test_lmdb_path: null
   batch_size:
-    train: 32
-    val: 32
-    test: 32
+    train: 512
+    val: 512
+    test: 512
   num_workers:
     train: 16
     val: 16
@@ -30,20 +30,20 @@ data:
   preload_to_ram: true
   use_pyg: false
 
-# Model architecture dimensions
+# Model architecture dimensions (reduced for fast testing)
 model:
-  atom_s: 768
-  token_s: 768
+  atom_s: 256
+  token_s: 256
 
   # Flow model arguments
   flow_model_args:
-    atom_encoder_depth: 6
-    atom_encoder_heads: 12
+    atom_encoder_depth: 2
+    atom_encoder_heads: 4
     atom_encoder_positional_encoding: false
-    token_transformer_depth: 12
-    token_transformer_heads: 12
-    atom_decoder_depth: 6
-    atom_decoder_heads: 12
+    token_transformer_depth: 4
+    token_transformer_heads: 4
+    atom_decoder_depth: 2
+    atom_decoder_heads: 4
     attention_impl: "pytorch"  # "pytorch", "xformers", "manual"
     activation_checkpointing: false
     dng: true  # Dynamic Nuclear Graph mode
@@ -88,22 +88,22 @@ model:
 
 # Training configuration
 training:
-  max_epochs: 1000
+  max_epochs: 20
   accelerator: "gpu"
   devices: 1
   strategy: "auto"
-  precision: 32
+  precision: "bf16-mixed"
   accumulate_grad_batches: 1
   num_sanity_val_steps: 2
   gradient_clip_val: 10.0
   gradient_clip_algorithm: "norm"
-  val_check_interval: 1
+  val_check_interval: 1.0
 
   # Loss configuration
   train_multiplicity: 1
   loss_type: "l2"  # "l1" or "l2"
   prim_slab_coord_loss_weight: 1.0
-  ads_coord_loss_weight: 0.1
+  ads_coord_loss_weight: 1.0
   length_loss_weight: 1.0
   angle_loss_weight: 0.01
   supercell_matrix_loss_weight: 1.0
@@ -113,14 +113,14 @@ training:
 
   # Optimizer
   lr: 0.0001
-  weight_decay: 0.0
+  weight_decay: 0.01
   adam_beta1: 0.9
   adam_beta2: 0.999
 
   # Learning rate scheduler
   scheduler:
     type: "cosine_warmup"  # "none", "cosine_warmup", "linear_warmup"
-    warmup_steps: 1000  # Number of warmup steps (or use warmup_epochs)
+    warmup_steps: 10000  # Number of warmup steps (or use warmup_epochs)
     warmup_epochs: null  # Alternative: warmup as fraction of epochs (overrides warmup_steps if set)
     min_lr_ratio: 0.01  # Minimum LR as ratio of initial LR (for cosine annealing)
 
@@ -133,7 +133,7 @@ training:
 
 # Validation configuration
 validation:
-  sample_every_n_epochs: 5
+  sample_every_n_epochs: 2
   flow_samples: 1
   sampling_steps: 50
   sampling_center_coords: false

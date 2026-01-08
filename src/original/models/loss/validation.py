@@ -779,3 +779,150 @@ def crystal_validity(crystal, cutoff=4.1):
         return False
     else:
         return True
+
+
+def compute_comprehensive_validity_single(
+    args: Tuple[
+        np.ndarray,  # sampled_prim_slab_coords: (n_samples, n_prim_slab_atoms, 3)
+        np.ndarray,  # sampled_ads_coords: (n_samples, n_ads_atoms, 3)
+        np.ndarray,  # sampled_lattices: (n_samples, 6)
+        np.ndarray,  # sampled_supercell_matrices: (n_samples, 3, 3) or (n_samples, 9)
+        np.ndarray,  # sampled_scaling_factors: (n_samples,)
+        np.ndarray,  # prim_slab_atom_types: (n_prim_slab_atoms,)
+        np.ndarray,  # ads_atom_types: (n_ads_atoms,)
+        np.ndarray,  # prim_slab_atom_mask: (n_prim_slab_atoms,) bool
+        np.ndarray,  # ads_atom_mask: (n_ads_atoms,) bool
+    ],
+) -> List[Dict[str, bool]]:
+    """
+    Compute comprehensive validity for sampled structures.
+
+    Returns for each sample a dict with:
+    - basic_valid: volume >= 0.1, min_dist >= 0.5
+    - structural_valid: basic + width >= 8A, height >= 20A
+    - smact_valid: charge neutrality and electronegativity
+    - crystal_valid: connectivity (cutoff 4.1A)
+
+    Designed to be run in parallel with ProcessPool.
+
+    Args:
+        args: Tuple containing:
+            - sampled_prim_slab_coords: Sampled prim slab coordinates (n_samples, n_atoms, 3)
+            - sampled_ads_coords: Sampled adsorbate coordinates (n_samples, n_ads_atoms, 3)
+            - sampled_lattices: Sampled lattice parameters (n_samples, 6)
+            - sampled_supercell_matrices: Supercell transformation matrices (n_samples, 3, 3) or (n_samples, 9)
+            - sampled_scaling_factors: Z-direction scaling factors (n_samples,)
+            - prim_slab_atom_types: Atomic numbers for prim slab atoms
+            - ads_atom_types: Atomic numbers for adsorbate atoms
+            - prim_slab_atom_mask: Boolean mask for valid prim slab atoms
+            - ads_atom_mask: Boolean mask for valid adsorbate atoms
+
+    Returns:
+        List of dicts with individual validity components for each sample.
+    """
+    (
+        sampled_prim_slab_coords,
+        sampled_ads_coords,
+        sampled_lattices,
+        sampled_supercell_matrices,
+        sampled_scaling_factors,
+        prim_slab_atom_types,
+        ads_atom_types,
+        prim_slab_atom_mask,
+        ads_atom_mask,
+    ) = args
+
+    n_samples = sampled_prim_slab_coords.shape[0]
+
+    results = []
+    for i in range(n_samples):
+        result = {
+            "basic_valid": False,
+            "structural_valid": False,
+            "smact_valid": False,
+            "crystal_valid": False,
+        }
+
+        try:
+            # Assemble the system
+            recon_system, recon_slab = assemble(
+                generated_prim_slab_coords=sampled_prim_slab_coords[i],
+                generated_ads_coords=sampled_ads_coords[i],
+                generated_lattice=sampled_lattices[i],
+                generated_supercell_matrix=sampled_supercell_matrices[i].reshape(3, 3),
+                generated_scaling_factor=sampled_scaling_factors[i],
+                prim_slab_atom_types=prim_slab_atom_types,
+                ads_atom_types=ads_atom_types,
+                prim_slab_atom_mask=prim_slab_atom_mask,
+                ads_atom_mask=ads_atom_mask,
+            )
+
+            # 1. Basic validity (volume, min_dist)
+            try:
+                vol = float(recon_system.get_volume())
+                vol_ok = vol >= 0.1
+            except Exception:
+                vol_ok = False
+
+            try:
+                if len(recon_system) > 1:
+                    dists = recon_system.get_all_distances()
+                    min_dist = np.min(dists[np.nonzero(dists)])
+                    dist_ok = min_dist >= 0.5
+                else:
+                    dist_ok = True
+            except Exception:
+                dist_ok = False
+
+            result["basic_valid"] = bool(vol_ok and dist_ok)
+
+            # 2. Structural validity (basic + width/height checks)
+            if result["basic_valid"]:
+                # Width check (a, b axes)
+                min_ab = 8.0
+                a_length = np.linalg.norm(recon_system.cell[0])
+                b_length = np.linalg.norm(recon_system.cell[1])
+                width_ok = a_length >= min_ab and b_length >= min_ab
+
+                # Height check (c projected onto normal of a×b plane)
+                min_height = 20.0
+                a_vec = recon_system.cell[0]
+                b_vec = recon_system.cell[1]
+                c_vec = recon_system.cell[2]
+                cross_ab = np.cross(a_vec, b_vec)
+                cross_ab_norm = np.linalg.norm(cross_ab)
+                if cross_ab_norm < 1e-10:
+                    height_ok = False
+                else:
+                    normal = cross_ab / cross_ab_norm
+                    proj_height = abs(np.dot(normal, c_vec))
+                    height_ok = proj_height >= min_height
+
+                result["structural_valid"] = bool(width_ok and height_ok)
+            else:
+                result["structural_valid"] = False
+
+            # 3. SMACT validity (charge neutrality)
+            if result["basic_valid"]:
+                try:
+                    result["smact_valid"] = smact_validity(recon_system)
+                except Exception:
+                    result["smact_valid"] = False
+            else:
+                result["smact_valid"] = False
+
+            # 4. Crystal validity (connectivity)
+            if result["basic_valid"]:
+                try:
+                    result["crystal_valid"] = crystal_validity(recon_system)
+                except Exception:
+                    result["crystal_valid"] = False
+            else:
+                result["crystal_valid"] = False
+
+        except Exception as e:
+            print(f"WARNING: Failed to compute comprehensive validity for sample {i}: {e}", file=sys.stderr)
+
+        results.append(result)
+
+    return results

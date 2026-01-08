@@ -226,6 +226,7 @@ from src.reimplementation.models.loss.validation import (
     find_best_match_rmsd_slab,
     compute_structural_validity_single,
     compute_prim_structural_validity_single,
+    compute_comprehensive_validity_single,
     get_uma_calculator,
 )
 from src.reimplementation.models.loss.utils import stratify_loss_by_time
@@ -276,6 +277,8 @@ class EffCatModule(LightningModule):
         self.val_adsorption_energy = MeanMetric(sync_on_compute=False)
         self.val_structural_validity = MeanMetric(sync_on_compute=False)
         self.val_prim_structural_validity = MeanMetric(sync_on_compute=False)
+        self.val_smact_validity = MeanMetric(sync_on_compute=False)
+        self.val_crystal_validity = MeanMetric(sync_on_compute=False)
         self.validation_step_outputs = []
         
         # UMA calculator for adsorption energy (lazy initialization)
@@ -1017,23 +1020,42 @@ class EffCatModule(LightningModule):
                 else:
                     self.val_prim_structural_validity.update(0.0)
 
-            # Execute slab structural validity tasks in parallel (always computed)
-            slab_validity_results_per_item = _run_parallel_tasks(
+            # Execute comprehensive validity tasks in parallel (structural + SMACT + crystal)
+            comprehensive_validity_results_per_item = _run_parallel_tasks(
                 tasks=slab_validity_tasks,
-                task_fn=compute_structural_validity_single,
+                task_fn=compute_comprehensive_validity_single,
                 num_workers=num_workers,
                 timeout_seconds=timeout_seconds,
-                task_name="Slab structural validity",
-                default_result=[False] * n_samples,
+                task_name="Comprehensive validity",
+                default_result=[
+                    {"basic_valid": False, "structural_valid": False, "smact_valid": False, "crystal_valid": False}
+                    for _ in range(n_samples)
+                ],
             )
 
-            # Compute slab structural validity rate (always computed)
+            # Process comprehensive validity results
             # Count as valid if at least one sample is valid (consistent with prim/slab RMSD)
-            for result_list in slab_validity_results_per_item:
-                if any(result_list):
+            for result_list in comprehensive_validity_results_per_item:
+                # Structural validity (basic + width/height)
+                structural_valid_list = [r.get("basic_valid", False) and r.get("structural_valid", False) for r in result_list]
+                if any(structural_valid_list):
                     self.val_structural_validity.update(1.0)
                 else:
                     self.val_structural_validity.update(0.0)
+
+                # SMACT validity
+                smact_valid_list = [r.get("smact_valid", False) for r in result_list]
+                if any(smact_valid_list):
+                    self.val_smact_validity.update(1.0)
+                else:
+                    self.val_smact_validity.update(0.0)
+
+                # Crystal validity
+                crystal_valid_list = [r.get("crystal_valid", False) for r in result_list]
+                if any(crystal_valid_list):
+                    self.val_crystal_validity.update(1.0)
+                else:
+                    self.val_crystal_validity.update(0.0)
 
             # Execute adsorption energy tasks in main process (reuse calculator)
             # NOTE: Adsorption computation is disabled by default in DDP due to long runtime
@@ -1154,7 +1176,21 @@ class EffCatModule(LightningModule):
                 self.val_structural_validity.compute() if self.val_structural_validity.update_count > 0 else float("nan"),
                 rank_zero_only=True,
             )
-            
+
+            # Log SMACT validity
+            self.log(
+                "val/smact_validity_rate",
+                self.val_smact_validity.compute() if self.val_smact_validity.update_count > 0 else float("nan"),
+                rank_zero_only=True,
+            )
+
+            # Log crystal validity
+            self.log(
+                "val/crystal_validity_rate",
+                self.val_crystal_validity.compute() if self.val_crystal_validity.update_count > 0 else float("nan"),
+                rank_zero_only=True,
+            )
+
             # Log adsorption energy (only if computed)
             if compute_adsorption:
                 if self.val_adsorption_energy.update_count > 0:
@@ -1184,6 +1220,8 @@ class EffCatModule(LightningModule):
             self.val_adsorption_energy.reset()
             self.val_structural_validity.reset()
             self.val_prim_structural_validity.reset()
+            self.val_smact_validity.reset()
+            self.val_crystal_validity.reset()
             self.validation_step_outputs.clear()  # free memory
 
     def test_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
