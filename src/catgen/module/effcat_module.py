@@ -1,226 +1,31 @@
 import os
-import gc
 import json
-import math
 import time
-import random
 import tempfile
-import multiprocessing as mp
-from contextlib import contextmanager
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import torch
 import numpy as np
 import wandb
-from torch.optim.lr_scheduler import LambdaLR
 from ase.io import write as ase_write
 from einops import rearrange
 from lightning import Callback, LightningModule
 from lightning.pytorch.utilities import rank_zero_info
-from torch import Tensor, nn
+from torch import Tensor
 from torchmetrics import MeanMetric
-from pebble import ProcessPool
-from concurrent.futures import TimeoutError as PebbleTimeoutError
 from pymatgen.analysis.structure_matcher import StructureMatcher
 from tqdm import tqdm
 
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-def get_cosine_schedule_with_warmup(
-    optimizer: torch.optim.Optimizer,
-    num_warmup_steps: int,
-    num_training_steps: int,
-    min_lr_ratio: float = 0.0,
-    last_epoch: int = -1,
-) -> LambdaLR:
-    """Create a schedule with linear warmup and cosine annealing.
-
-    Args:
-        optimizer: The optimizer for which to schedule the learning rate.
-        num_warmup_steps: Number of warmup steps.
-        num_training_steps: Total number of training steps.
-        min_lr_ratio: Minimum learning rate as a ratio of the initial LR.
-        last_epoch: The index of last epoch when resuming training.
-
-    Returns:
-        LambdaLR scheduler with linear warmup and cosine annealing.
-    """
-    def lr_lambda(current_step: int) -> float:
-        # Linear warmup
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-
-        # Cosine annealing after warmup
-        progress = float(current_step - num_warmup_steps) / float(
-            max(1, num_training_steps - num_warmup_steps)
-        )
-        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
-
-        # Scale between min_lr_ratio and 1.0
-        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay
-
-    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
-
-
-def get_linear_schedule_with_warmup(
-    optimizer: torch.optim.Optimizer,
-    num_warmup_steps: int,
-    num_training_steps: int,
-    last_epoch: int = -1,
-) -> LambdaLR:
-    """Create a schedule with linear warmup and linear decay.
-
-    Args:
-        optimizer: The optimizer for which to schedule the learning rate.
-        num_warmup_steps: Number of warmup steps.
-        num_training_steps: Total number of training steps.
-        last_epoch: The index of last epoch when resuming training.
-
-    Returns:
-        LambdaLR scheduler with linear warmup and linear decay.
-    """
-    def lr_lambda(current_step: int) -> float:
-        # Linear warmup
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-
-        # Linear decay after warmup
-        return max(
-            0.0,
-            float(num_training_steps - current_step) /
-            float(max(1, num_training_steps - num_warmup_steps))
-        )
-
-    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
-
-
-@contextmanager
-def handle_cuda_oom(action_name: str = "operation"):
-    """Context manager to handle CUDA out-of-memory errors gracefully.
-
-    Usage:
-        with handle_cuda_oom("sampling"):
-            result = model(batch)
-        # If OOM occurs, logs warning and clears cache
-
-    Args:
-        action_name: Description of the operation for logging.
-
-    Yields:
-        None
-
-    Raises:
-        RuntimeError: Re-raises if the error is not OOM-related.
-    """
-    try:
-        yield
-    except RuntimeError as e:
-        # Check for CUDA OOM using torch's built-in method when available
-        is_oom = False
-        if hasattr(torch.cuda, 'OutOfMemoryError') and isinstance(e, torch.cuda.OutOfMemoryError):
-            is_oom = True
-        elif "out of memory" in str(e).lower() or "CUDA out of memory" in str(e):
-            is_oom = True
-
-        if is_oom:
-            rank_zero_info(f"| WARNING: CUDA out of memory during {action_name}. Clearing cache.")
-            torch.cuda.empty_cache()
-            gc.collect()
-        else:
-            raise
-
-
-def _expand_tensor_for_multiplicity(
-    tensor: Tensor,
-    multiplicity: int,
-    target_size: Optional[int] = None,
-    pad_value: float = 0.0,
-) -> Tensor:
-    """Expand a tensor for multiplicity and optionally resize to target_size.
-
-    Args:
-        tensor: Input tensor of shape (B, N, ...) or (B, N)
-        multiplicity: Number of times to repeat each sample
-        target_size: Optional target size for dimension 1. If provided, pads or slices.
-        pad_value: Value to use for padding (default: 0.0)
-
-    Returns:
-        Expanded tensor of shape (B*multiplicity, target_size or N, ...)
-    """
-    if target_size is not None:
-        current_size = tensor.shape[1]
-        if target_size > current_size:
-            # Pad
-            pad_shape = list(tensor.shape)
-            pad_shape[1] = target_size - current_size
-            padding = torch.full(pad_shape, pad_value, device=tensor.device, dtype=tensor.dtype)
-            tensor = torch.cat([tensor, padding], dim=1)
-        elif target_size < current_size:
-            # Slice
-            tensor = tensor[:, :target_size]
-
-    return tensor.repeat_interleave(multiplicity, dim=0)
-
-
-def _run_parallel_tasks(
-    tasks: list,
-    task_fn: Callable,
-    num_workers: int,
-    timeout_seconds: float,
-    task_name: str,
-    default_result: Any,
-) -> list:
-    """Execute tasks in parallel using ProcessPool with consistent error handling.
-
-    Args:
-        tasks: List of task arguments (each element is passed to task_fn)
-        task_fn: Function to execute for each task
-        num_workers: Number of parallel workers
-        timeout_seconds: Timeout per task in seconds
-        task_name: Name for logging (e.g., "Prim RMSD matching")
-        default_result: Result to use when a task fails or times out
-
-    Returns:
-        List of results, one per task
-    """
-    if not tasks:
-        return []
-
-    rank_zero_info(f"| Computing {task_name} for {len(tasks)} structures (workers={num_workers})...")
-    results = []
-
-    with ProcessPool(max_workers=num_workers, context=mp.get_context("spawn")) as pool:
-        future_map = {
-            pool.schedule(task_fn, args=(task,)): task
-            for task in tasks
-        }
-
-        for future in tqdm(
-            future_map,
-            desc=task_name,
-            unit="struct",
-            total=len(tasks),
-            leave=False,
-        ):
-            try:
-                result = future.result(timeout=timeout_seconds)
-                results.append(result)
-            except PebbleTimeoutError:
-                future.cancel()
-                rank_zero_info(f"| WARNING: A {task_name} task timed out. Skipping.")
-                results.append(default_result)
-            except Exception as e:
-                future.cancel()
-                rank_zero_info(f"| WARNING: A {task_name} task failed: {e}")
-                results.append(default_result)
-
-    rank_zero_info(f"| {task_name} computation completed.")
-    return results
-
 from src.catgen.data.prior import CatPriorSampler
+from src.catgen.module.parallel_utils import (
+    handle_cuda_oom,
+    expand_tensor_for_multiplicity,
+    run_parallel_tasks,
+)
+from src.catgen.module.lr_schedulers import (
+    get_cosine_schedule_with_warmup,
+    get_linear_schedule_with_warmup,
+)
 from src.catgen.models.loss.validation import (
     find_best_match_rmsd_prim,
     find_best_match_rmsd_slab,
@@ -407,7 +212,7 @@ class EffCatModule(LightningModule):
         for key, needs_resize, pad_value in prim_slab_tensors:
             if key in feats:
                 resize_target = target_n if needs_resize else None
-                feats[key] = _expand_tensor_for_multiplicity(
+                feats[key] = expand_tensor_for_multiplicity(
                     feats[key], multiplicity, resize_target, pad_value
                 )
 
@@ -965,7 +770,7 @@ class EffCatModule(LightningModule):
             # Execute RMSD tasks only when dng=False (excluded when dng=True)
             if not self.dng:
                 # Execute prim RMSD tasks in parallel
-                prim_rmsd_results_per_item = _run_parallel_tasks(
+                prim_rmsd_results_per_item = run_parallel_tasks(
                     tasks=prim_rmsd_tasks,
                     task_fn=find_best_match_rmsd_prim,
                     num_workers=num_workers,
@@ -984,7 +789,7 @@ class EffCatModule(LightningModule):
                         self.val_prim_match_rate.update(0.0)
 
                 # Execute slab RMSD tasks in parallel
-                slab_rmsd_results_per_item = _run_parallel_tasks(
+                slab_rmsd_results_per_item = run_parallel_tasks(
                     tasks=slab_rmsd_tasks,
                     task_fn=find_best_match_rmsd_slab,
                     num_workers=num_workers,
@@ -1003,7 +808,7 @@ class EffCatModule(LightningModule):
                         self.val_slab_match_rate.update(0.0)
 
             # Execute prim structural validity tasks in parallel (always computed)
-            prim_validity_results_per_item = _run_parallel_tasks(
+            prim_validity_results_per_item = run_parallel_tasks(
                 tasks=prim_validity_tasks,
                 task_fn=compute_prim_structural_validity_single,
                 num_workers=num_workers,
@@ -1021,7 +826,7 @@ class EffCatModule(LightningModule):
                     self.val_prim_structural_validity.update(0.0)
 
             # Execute comprehensive validity tasks in parallel (structural + SMACT + crystal)
-            comprehensive_validity_results_per_item = _run_parallel_tasks(
+            comprehensive_validity_results_per_item = run_parallel_tasks(
                 tasks=slab_validity_tasks,
                 task_fn=compute_comprehensive_validity_single,
                 num_workers=num_workers,
