@@ -75,6 +75,9 @@ model:
     # Adsorbate coordinate standardization parameters
     ads_coord_mean: [0.007402, -0.702398, 0.934607]
     ads_coord_std: [8.247430, 9.035212, 9.979235]
+    # Scaling factor standardization parameters (computed from training data)
+    scaling_factor_mean: 3.422560
+    scaling_factor_std: 0.473372
 
   # Flow process arguments
   flow_process_args:
@@ -105,7 +108,7 @@ training:
   prim_slab_coord_loss_weight: 1.0
   ads_coord_loss_weight: 1.0
   length_loss_weight: 1.0
-  angle_loss_weight: 0.01
+  angle_loss_weight: 1.0
   supercell_matrix_loss_weight: 1.0
   supercell_matrix_cosine_reg_weight: 0.0
   scaling_factor_loss_weight: 1.0

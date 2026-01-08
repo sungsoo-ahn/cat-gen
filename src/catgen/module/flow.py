@@ -19,7 +19,6 @@ from src.catgen.constants import (
     MASK_TOKEN_INDEX,
     NUM_ELEMENTS_WITH_MASK,
     FLOW_EPSILON,
-    ANGLE_LOSS_SCALE,
     EPS_NUMERICAL,
 )
 
@@ -299,15 +298,16 @@ class AtomFlowMatching(Module):
         prim_slab_r_noisy = self.prior_sampler.normalize_prim_slab_coords(noised_prim_slab_coords)
         ads_r_noisy = self.prior_sampler.normalize_ads_coords(noised_ads_coords)
 
-        # Lattice: lengths (Angstrom -> nm), angles (degrees -> radians)
+        # Lattice: lengths (Angstrom -> nm), angles (degrees -> normalized)
         l_noisy = noised_lattice.clone()
         l_noisy[:, :3] = self.ANG_TO_NM_SCALE * noised_lattice[:, :3]
-        l_noisy[:, 3:] = (torch.pi / 180.0) * noised_lattice[:, 3:]
+        l_noisy[:, 3:] = self.prior_sampler.normalize_angles(noised_lattice[:, 3:])
 
-        # Normalize supercell matrix (scaling factor uses raw values without normalization)
-        # sm_noisy = self.prior_sampler.normalize_supercell(noised_supercell_matrix)
-        sm_noisy = noised_supercell_matrix
-        sf_noisy = noised_scaling_factor
+        # Normalize supercell matrix
+        sm_noisy = self.prior_sampler.normalize_supercell(noised_supercell_matrix)
+
+        # Normalize scaling factor
+        sf_noisy = self.prior_sampler.normalize_scaling_factor(noised_scaling_factor)
 
         # Predict (network operates in standardized/normalized space)
         net_out = self.flow_model(
@@ -330,15 +330,16 @@ class AtomFlowMatching(Module):
         # Relative positions: denormalize using same transform (they're in normalized coord space)
         denoised_ads_rel = self.prior_sampler.denormalize_ads_coords(net_out["ads_rel_update"]) - self.prior_sampler.ads_coord_mean.to(net_out["ads_rel_update"].device)  # Remove mean shift for relative
 
-        # Lattice: lengths (nm -> Angstrom), angles (radians -> degrees)
+        # Lattice: lengths (nm -> Angstrom), angles (normalized -> degrees)
         denoised_lattice = net_out["l_update"].clone()
         denoised_lattice[:, :3] = self.NM_TO_ANG_SCALE * denoised_lattice[:, :3]
-        denoised_lattice[:, 3:] = (180.0 / torch.pi) * denoised_lattice[:, 3:]
+        denoised_lattice[:, 3:] = self.prior_sampler.denormalize_angles(net_out["l_update"][:, 3:])
 
         # Denormalize supercell matrix back to raw space
-        # denoised_supercell_matrix = self.prior_sampler.denormalize_supercell(net_out["sm_update"])
-        denoised_supercell_matrix = net_out["sm_update"]
-        denoised_scaling_factor = net_out["sf_update"]
+        denoised_supercell_matrix = self.prior_sampler.denormalize_supercell(net_out["sm_update"])
+
+        # Denormalize scaling factor back to raw space
+        denoised_scaling_factor = self.prior_sampler.denormalize_scaling_factor(net_out["sf_update"])
 
         # Build result dict
         result = {
@@ -555,12 +556,11 @@ class AtomFlowMatching(Module):
             pred_lattice[:, :3], true_lattice[:, :3], reduction="none"
         ).mean(dim=1)
 
-        # Normalize angle loss by expected variance to bring it to similar scale as other losses
-        # Angles range ~60-120 degrees, so variance ~300 for uniform distribution
-        # This makes angle_loss comparable to coord_loss in magnitude
+        # Angle loss (angles are in raw degrees space, loss computed directly)
+        # Note: angles are now properly normalized in network input space, so no ANGLE_LOSS_SCALE needed
         angle_loss = loss_fn(
             pred_lattice[:, 3:], true_lattice[:, 3:], reduction="none"
-        ).mean(dim=1) / ANGLE_LOSS_SCALE
+        ).mean(dim=1)
 
         # Loss for supercell matrix (raw space)
         true_supercell_matrix = out_dict["aligned_true_supercell_matrix"]  # (B, 3, 3) raw space

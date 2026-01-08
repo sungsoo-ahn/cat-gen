@@ -99,6 +99,9 @@ class CatPriorSampler:
         prim_slab_coord_std: List[float] = None,
         ads_coord_mean: List[float] = None,
         ads_coord_std: List[float] = None,
+        # Scaling factor standardization parameters (computed from train set)
+        scaling_factor_mean: float = 3.422560,
+        scaling_factor_std: float = 0.473372,
     ):
         self.coord_std = coord_std
 
@@ -124,6 +127,9 @@ class CatPriorSampler:
         angle_mean = (uniform_low + uniform_high) / 2.0  # 90.0
         angle_std = (uniform_high - uniform_low) / (2 * 3**0.5)  # ~17.32 for uniform
         self.angle_normalizer = Normalizer(angle_mean, angle_std)
+
+        # Scaling factor normalizer
+        self.scaling_factor_normalizer = Normalizer(scaling_factor_mean, scaling_factor_std)
 
     def sample(self, data: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Sample from prior distributions for coords, lattice, and supercell matrix."""
@@ -166,16 +172,13 @@ class CatPriorSampler:
         # Combine into lattice_0: (a, b, c, alpha, beta, gamma)
         lattice_0 = torch.cat([lengths_0, angles_0], dim=-1)  # (B, 6)
 
-        # # Sample supercell matrix from standard normal N(0, 1) in normalized space, then denormalize to raw space
-        # supercell_matrix_0_normalized = torch.randn(batch_size, 3, 3, device=device, dtype=dtype)  # (B, 3, 3)
-        # supercell_matrix_0 = self.denormalize_supercell(supercell_matrix_0_normalized)  # (B, 3, 3) raw space
-        
-        identity = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).repeat(batch_size, 1, 1)
-        noise = torch.randn(batch_size, 3, 3, device=device, dtype=dtype) * 0.1
-        supercell_matrix_0 = identity + noise
+        # Sample supercell matrix from N(0, coord_std^2) in normalized space, then denormalize to raw space
+        supercell_matrix_0_normalized = torch.randn(batch_size, 3, 3, device=device, dtype=dtype) * self.coord_std
+        supercell_matrix_0 = self.supercell_normalizer.denormalize(supercell_matrix_0_normalized)  # (B, 3, 3) raw space
 
-        # Sample scaling factor from Gaussian N(0, coord_std^2) - no normalization
-        scaling_factor_0 = torch.randn(batch_size, device=device, dtype=dtype) * self.coord_std  # (B,)
+        # Sample scaling factor from Gaussian N(0, coord_std^2) in normalized space, then denormalize
+        scaling_factor_0_normalized = torch.randn(batch_size, device=device, dtype=dtype) * self.coord_std
+        scaling_factor_0 = self.scaling_factor_normalizer.denormalize(scaling_factor_0_normalized)  # (B,)
 
         return {
             "prim_slab_coords_0": prim_slab_coords_0,  # (B, N, 3) raw space (Angstrom)
@@ -248,3 +251,11 @@ class CatPriorSampler:
     def denormalize_angles(self, angles_normalized: torch.Tensor) -> torch.Tensor:
         """Denormalize lattice angles. Delegates to angle_normalizer."""
         return self.angle_normalizer.denormalize(angles_normalized)
+
+    def normalize_scaling_factor(self, scaling_factor: torch.Tensor) -> torch.Tensor:
+        """Normalize scaling factor. Delegates to scaling_factor_normalizer."""
+        return self.scaling_factor_normalizer.normalize(scaling_factor)
+
+    def denormalize_scaling_factor(self, scaling_factor_normalized: torch.Tensor) -> torch.Tensor:
+        """Denormalize scaling factor. Delegates to scaling_factor_normalizer."""
+        return self.scaling_factor_normalizer.denormalize(scaling_factor_normalized)
