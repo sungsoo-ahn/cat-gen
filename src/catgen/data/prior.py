@@ -1,11 +1,49 @@
 """Prior samplers for flow matching."""
 
-from typing import Any, Dict, List, Protocol
+from typing import Any, Dict, List, Protocol, Union
 
 import torch
+from torch import Tensor
 from torch.distributions import LogNormal, Uniform
 
 from src.catgen.constants import EPS_NUMERICAL
+
+
+class Normalizer:
+    """Generic normalizer for tensors using mean and standard deviation.
+
+    Provides normalize and denormalize operations:
+    - normalize: (x - mean) / (std + eps)
+    - denormalize: x * std + mean
+
+    Handles automatic device and dtype conversion.
+    """
+
+    def __init__(
+        self,
+        mean: Union[List[float], List[List[float]], float],
+        std: Union[List[float], List[List[float]], float],
+    ):
+        """Initialize normalizer with mean and std.
+
+        Args:
+            mean: Mean value(s) for normalization. Can be scalar, 1D list, or 2D list.
+            std: Standard deviation(s) for normalization. Same shape as mean.
+        """
+        self.mean = torch.tensor(mean, dtype=torch.float32)
+        self.std = torch.tensor(std, dtype=torch.float32)
+
+    def normalize(self, x: Tensor) -> Tensor:
+        """Normalize tensor: (x - mean) / (std + eps)."""
+        mean = self.mean.to(x.device, x.dtype)
+        std = self.std.to(x.device, x.dtype)
+        return (x - mean) / (std + EPS_NUMERICAL)
+
+    def denormalize(self, x: Tensor) -> Tensor:
+        """Denormalize tensor: x * std + mean."""
+        mean = self.mean.to(x.device, x.dtype)
+        std = self.std.to(x.device, x.dtype)
+        return x * std + mean
 
 
 class PriorSampler(Protocol):
@@ -75,20 +113,17 @@ class CatPriorSampler:
             low=uniform_low - uniform_eps,
             high=uniform_high + uniform_eps,
         )
-        
-        self.supercell_mean = torch.tensor(supercell_mean, dtype=torch.float32)  # (3, 3)
-        self.supercell_std = torch.tensor(supercell_std, dtype=torch.float32)  # (3, 3)
-        
-        self.prim_slab_coord_mean = torch.tensor(prim_slab_coord_mean, dtype=torch.float32)  # (3,)
-        self.prim_slab_coord_std = torch.tensor(prim_slab_coord_std, dtype=torch.float32)  # (3,)
-        
-        self.ads_coord_mean = torch.tensor(ads_coord_mean, dtype=torch.float32)  # (3,)
-        self.ads_coord_std = torch.tensor(ads_coord_std, dtype=torch.float32)  # (3,)
+
+        # Create normalizers using the generic Normalizer class
+        self.supercell_normalizer = Normalizer(supercell_mean, supercell_std)
+        self.prim_slab_coord_normalizer = Normalizer(prim_slab_coord_mean, prim_slab_coord_std)
+        self.ads_coord_normalizer = Normalizer(ads_coord_mean, ads_coord_std)
 
         # Angle normalization parameters (degrees)
         # Mean is center of uniform range, std is sqrt(variance) of uniform distribution
-        self.angle_mean = (uniform_low + uniform_high) / 2.0  # 90.0
-        self.angle_std = (uniform_high - uniform_low) / (2 * 3**0.5)  # ~17.32 for uniform
+        angle_mean = (uniform_low + uniform_high) / 2.0  # 90.0
+        angle_std = (uniform_high - uniform_low) / (2 * 3**0.5)  # ~17.32 for uniform
+        self.angle_normalizer = Normalizer(angle_mean, angle_std)
 
     def sample(self, data: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Sample from prior distributions for coords, lattice, and supercell matrix."""
@@ -109,7 +144,7 @@ class CatPriorSampler:
         )
         prim_slab_coords_0_normalized = prim_slab_coords_0_normalized * prim_slab_atom_mask.unsqueeze(-1)
         # Denormalize to raw space (Angstrom)
-        prim_slab_coords_0 = self.denormalize_prim_slab_coords(prim_slab_coords_0_normalized)
+        prim_slab_coords_0 = self.prim_slab_coord_normalizer.denormalize(prim_slab_coords_0_normalized)
 
         # Sample adsorbate coordinates from Gaussian N(0, coord_std^2) in normalized space, then denormalize to raw space
         ads_coords_0_normalized = (
@@ -118,7 +153,7 @@ class CatPriorSampler:
         )
         ads_coords_0_normalized = ads_coords_0_normalized * ads_atom_mask.unsqueeze(-1)
         # Denormalize to raw space (Angstrom)
-        ads_coords_0 = self.denormalize_ads_coords(ads_coords_0_normalized)
+        ads_coords_0 = self.ads_coord_normalizer.denormalize(ads_coords_0_normalized)
 
         # Sample lattice lengths from LogNormal distribution
         lengths_0 = self._lognormal.sample((batch_size,))  # (B, 3)
@@ -150,102 +185,66 @@ class CatPriorSampler:
             "scaling_factor_0": scaling_factor_0,  # (B,) raw value
         }
 
+    # Backward-compatible properties for direct attribute access
+    @property
+    def ads_coord_mean(self) -> torch.Tensor:
+        """Access ads_coord_mean from normalizer for backward compatibility."""
+        return self.ads_coord_normalizer.mean
+
+    @property
+    def ads_coord_std(self) -> torch.Tensor:
+        """Access ads_coord_std from normalizer for backward compatibility."""
+        return self.ads_coord_normalizer.std
+
+    @property
+    def prim_slab_coord_mean(self) -> torch.Tensor:
+        """Access prim_slab_coord_mean from normalizer for backward compatibility."""
+        return self.prim_slab_coord_normalizer.mean
+
+    @property
+    def prim_slab_coord_std(self) -> torch.Tensor:
+        """Access prim_slab_coord_std from normalizer for backward compatibility."""
+        return self.prim_slab_coord_normalizer.std
+
+    @property
+    def supercell_mean(self) -> torch.Tensor:
+        """Access supercell_mean from normalizer for backward compatibility."""
+        return self.supercell_normalizer.mean
+
+    @property
+    def supercell_std(self) -> torch.Tensor:
+        """Access supercell_std from normalizer for backward compatibility."""
+        return self.supercell_normalizer.std
+
+    # Backward-compatible wrapper methods that delegate to normalizers
     def normalize_supercell(self, supercell_matrix: torch.Tensor) -> torch.Tensor:
-        """Normalize supercell matrix using mean and std.
-        
-        Args:
-            supercell_matrix: (B, 3, 3) raw supercell matrix
-            
-        Returns:
-            (B, 3, 3) normalized supercell matrix
-        """
-        mean = self.supercell_mean.to(supercell_matrix.device, supercell_matrix.dtype)
-        std = self.supercell_std.to(supercell_matrix.device, supercell_matrix.dtype)
-        return (supercell_matrix - mean) / (std + EPS_NUMERICAL)
+        """Normalize supercell matrix. Delegates to supercell_normalizer."""
+        return self.supercell_normalizer.normalize(supercell_matrix)
 
     def denormalize_supercell(self, supercell_matrix_normalized: torch.Tensor) -> torch.Tensor:
-        """Denormalize supercell matrix back to original space.
-        
-        Args:
-            supercell_matrix_normalized: (B, 3, 3) normalized supercell matrix
-            
-        Returns:
-            (B, 3, 3) denormalized supercell matrix
-        """
-        mean = self.supercell_mean.to(supercell_matrix_normalized.device, supercell_matrix_normalized.dtype)
-        std = self.supercell_std.to(supercell_matrix_normalized.device, supercell_matrix_normalized.dtype)
-        return supercell_matrix_normalized * std + mean
+        """Denormalize supercell matrix. Delegates to supercell_normalizer."""
+        return self.supercell_normalizer.denormalize(supercell_matrix_normalized)
 
     def normalize_prim_slab_coords(self, coords: torch.Tensor) -> torch.Tensor:
-        """Standardize prim_slab coordinates using mean and std.
-        
-        Args:
-            coords: (B, N, 3) raw prim_slab coordinates in Angstrom
-            
-        Returns:
-            (B, N, 3) standardized coordinates
-        """
-        mean = self.prim_slab_coord_mean.to(coords.device, coords.dtype)
-        std = self.prim_slab_coord_std.to(coords.device, coords.dtype)
-        return (coords - mean) / (std + EPS_NUMERICAL)
+        """Normalize prim_slab coordinates. Delegates to prim_slab_coord_normalizer."""
+        return self.prim_slab_coord_normalizer.normalize(coords)
 
     def denormalize_prim_slab_coords(self, coords_normalized: torch.Tensor) -> torch.Tensor:
-        """Destandardize prim_slab coordinates back to original space.
-        
-        Args:
-            coords_normalized: (B, N, 3) standardized coordinates
-            
-        Returns:
-            (B, N, 3) denormalized coordinates in Angstrom
-        """
-        mean = self.prim_slab_coord_mean.to(coords_normalized.device, coords_normalized.dtype)
-        std = self.prim_slab_coord_std.to(coords_normalized.device, coords_normalized.dtype)
-        return coords_normalized * std + mean
+        """Denormalize prim_slab coordinates. Delegates to prim_slab_coord_normalizer."""
+        return self.prim_slab_coord_normalizer.denormalize(coords_normalized)
 
     def normalize_ads_coords(self, coords: torch.Tensor) -> torch.Tensor:
-        """Standardize adsorbate coordinates using mean and std.
-        
-        Args:
-            coords: (B, M, 3) raw adsorbate coordinates in Angstrom
-            
-        Returns:
-            (B, M, 3) standardized coordinates
-        """
-        mean = self.ads_coord_mean.to(coords.device, coords.dtype)
-        std = self.ads_coord_std.to(coords.device, coords.dtype)
-        return (coords - mean) / (std + EPS_NUMERICAL)
+        """Normalize adsorbate coordinates. Delegates to ads_coord_normalizer."""
+        return self.ads_coord_normalizer.normalize(coords)
 
     def denormalize_ads_coords(self, coords_normalized: torch.Tensor) -> torch.Tensor:
-        """Destandardize adsorbate coordinates back to original space.
-
-        Args:
-            coords_normalized: (B, M, 3) standardized coordinates
-
-        Returns:
-            (B, M, 3) denormalized coordinates in Angstrom
-        """
-        mean = self.ads_coord_mean.to(coords_normalized.device, coords_normalized.dtype)
-        std = self.ads_coord_std.to(coords_normalized.device, coords_normalized.dtype)
-        return coords_normalized * std + mean
+        """Denormalize adsorbate coordinates. Delegates to ads_coord_normalizer."""
+        return self.ads_coord_normalizer.denormalize(coords_normalized)
 
     def normalize_angles(self, angles: torch.Tensor) -> torch.Tensor:
-        """Normalize lattice angles (alpha, beta, gamma) in degrees.
-
-        Args:
-            angles: (B, 3) angles in degrees
-
-        Returns:
-            (B, 3) normalized angles (zero mean, unit variance)
-        """
-        return (angles - self.angle_mean) / (self.angle_std + EPS_NUMERICAL)
+        """Normalize lattice angles. Delegates to angle_normalizer."""
+        return self.angle_normalizer.normalize(angles)
 
     def denormalize_angles(self, angles_normalized: torch.Tensor) -> torch.Tensor:
-        """Denormalize lattice angles back to degrees.
-
-        Args:
-            angles_normalized: (B, 3) normalized angles
-
-        Returns:
-            (B, 3) angles in degrees
-        """
-        return angles_normalized * self.angle_std + self.angle_mean
+        """Denormalize lattice angles. Delegates to angle_normalizer."""
+        return self.angle_normalizer.denormalize(angles_normalized)
