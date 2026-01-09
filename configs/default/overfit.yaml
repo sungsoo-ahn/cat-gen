@@ -43,7 +43,7 @@ model:
     atom_decoder_heads: 4
     attention_impl: "flash"
     activation_checkpointing: false
-    dng: true
+    dng: false  # Disable DNG for deterministic overfitting (no random atom count sampling)
 
   prior_sampler_args:
     coord_std: 1.0
@@ -76,6 +76,7 @@ model:
     compile_model: false
     timestep_distribution: "uniform"  # Uniform for simpler training signal
     use_time_reweighting: false  # Disable for simpler loss
+    fixed_timestep: 0.5  # Fix timestep for deterministic training (critical for overfitting)
 
   use_kernels: false
 
@@ -110,7 +111,7 @@ training:
   prim_slab_element_loss_weight: 5.0
 
   # Optimizer - higher LR, no weight decay for overfitting
-  lr: 0.01  # 100x higher than default
+  lr: 0.001  # 10x higher than default
   weight_decay: 0.0  # No regularization
   adam_beta1: 0.9
   adam_beta2: 0.999

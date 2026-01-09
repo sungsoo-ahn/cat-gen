@@ -234,6 +234,7 @@ class AtomFlowMatching(Module):
         compile_model: bool = False,
         dng: bool = False,
         timestep_distribution: str = "uniform",
+        fixed_timestep: float = None,
         **kwargs: dict,
     ):
         super().__init__()
@@ -255,6 +256,7 @@ class AtomFlowMatching(Module):
         self.dng = dng
         self.timestep_distribution = timestep_distribution
         self.use_time_reweighting = kwargs.get("use_time_reweighting", False)
+        self.fixed_timestep = fixed_timestep  # For overfitting tests
 
     @property
     def device(self):
@@ -269,6 +271,10 @@ class AtomFlowMatching(Module):
         Returns:
             Tensor of shape (n,) with timesteps in [0, 1]
         """
+        # Fixed timestep for overfitting tests (deterministic training)
+        if self.fixed_timestep is not None:
+            return torch.full((n,), self.fixed_timestep, device=self.device)
+
         if self.timestep_distribution == "exponential":
             # Exponential distribution: more samples near t=0
             # Transform: t = 1 - exp(-3 * u) where u ~ Uniform(0, 1)
