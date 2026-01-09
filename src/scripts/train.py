@@ -115,6 +115,8 @@ def create_model(config: dict) -> EffCatModule:
         predict_args=prediction_config,
         use_kernels=model_config.get("use_kernels", False),
         dng=dng,
+        use_ema=training_config.get("use_ema", False),
+        ema_decay=training_config.get("ema_decay", 0.9999),
     )
 
     return model
@@ -204,6 +206,7 @@ def main(config_path: str, overwrite: bool = False, debug: bool = False):
         gradient_clip_algorithm=training_config["gradient_clip_algorithm"],
         accumulate_grad_batches=training_config["accumulate_grad_batches"],
         val_check_interval=training_config["val_check_interval"],
+        check_val_every_n_epoch=training_config.get("check_val_every_n_epoch"),
         num_sanity_val_steps=training_config["num_sanity_val_steps"],
         limit_train_batches=training_config.get("limit_train_batches"),
         limit_val_batches=training_config.get("limit_val_batches"),

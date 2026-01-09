@@ -100,6 +100,77 @@ class PositionalEmbedder(nn.Module):
         return pos_emb
 
 
+class ScaledDotProductAttention(nn.Module):
+    """Multi-head attention using PyTorch's scaled_dot_product_attention.
+
+    This automatically uses Flash Attention when available (PyTorch 2.0+).
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dropout: float = 0.0,
+        bias: bool = True,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.dropout = dropout
+
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+
+        # Combined QKV projection for efficiency
+        self.qkv = nn.Linear(embed_dim, 3 * embed_dim, bias=bias)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Forward pass with optional key padding mask.
+
+        Args:
+            x: Input tensor of shape (B, N, D)
+            key_padding_mask: Boolean mask of shape (B, N) where True = ignore position
+
+        Returns:
+            Output tensor of shape (B, N, D)
+        """
+        B, N, D = x.shape
+
+        # Compute Q, K, V
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, H, N, head_dim)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # Create attention mask from key_padding_mask
+        attn_mask = None
+        if key_padding_mask is not None:
+            # key_padding_mask: (B, N) True = ignore
+            # Convert to attention mask: (B, 1, 1, N) -> broadcasts to (B, H, N, N)
+            # Where True positions get -inf attention
+            attn_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, N)
+            attn_mask = attn_mask.expand(-1, -1, N, -1)  # (B, 1, N, N)
+            attn_mask = torch.where(attn_mask, float('-inf'), 0.0)
+
+        # Use scaled_dot_product_attention (Flash Attention when available)
+        dropout_p = self.dropout if self.training else 0.0
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p,
+            is_causal=False,
+        )
+
+        # Reshape and project output
+        out = out.transpose(1, 2).reshape(B, N, D)
+        out = self.out_proj(out)
+        return out
+
+
 class MLP(nn.Module):
     """MLP as used in Vision Transformer, MLP-Mixer and related networks."""
 
@@ -140,7 +211,7 @@ class MLP(nn.Module):
 #                                 Core DiT Model                                #
 #################################################################################
 
-AttentionImpl = Literal["manual", "pytorch", "xformers"]
+AttentionImpl = Literal["manual", "pytorch", "xformers", "flash"]
 
 
 class DiTBlock(nn.Module):
@@ -156,9 +227,19 @@ class DiTBlock(nn.Module):
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
-        self.attn = nn.MultiheadAttention(
-            dim, num_heads=heads, dropout=dropout, bias=True, batch_first=True
-        )
+        self.attention_impl = attention_impl
+
+        # Select attention implementation
+        if attention_impl == "flash":
+            self.attn = ScaledDotProductAttention(
+                embed_dim=dim, num_heads=heads, dropout=dropout, bias=True
+            )
+        else:
+            # Default: PyTorch MultiheadAttention
+            self.attn = nn.MultiheadAttention(
+                dim, num_heads=heads, dropout=dropout, bias=True, batch_first=True
+            )
+
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(dim * mlp_ratio)
 
@@ -201,11 +282,15 @@ class DiTBlock(nn.Module):
         _x = modulate(self.norm1(x), shift_msa, scale_msa)
         # key_padding_mask: True = ignore position. Input mask is True = valid, so invert.
         key_padding_mask = ~mask.bool() if mask is not None else None
-        x = (
-            x
-            + gate_msa.unsqueeze(1)
-            * self.attn(_x, _x, _x, key_padding_mask=key_padding_mask, need_weights=False)[0]
-        )
+
+        if self.attention_impl == "flash":
+            # Flash attention via ScaledDotProductAttention
+            attn_out = self.attn(_x, key_padding_mask=key_padding_mask)
+        else:
+            # Standard PyTorch MultiheadAttention
+            attn_out = self.attn(_x, _x, _x, key_padding_mask=key_padding_mask, need_weights=False)[0]
+
+        x = x + gate_msa.unsqueeze(1) * attn_out
 
         # MLP block
         x = x + gate_mlp.unsqueeze(1) * self.mlp(

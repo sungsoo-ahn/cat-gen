@@ -233,6 +233,7 @@ class AtomFlowMatching(Module):
         synchronize_timesteps: bool = False,
         compile_model: bool = False,
         dng: bool = False,
+        timestep_distribution: str = "uniform",
         **kwargs: dict,
     ):
         super().__init__()
@@ -252,10 +253,48 @@ class AtomFlowMatching(Module):
         self.coordinate_augmentation = coordinate_augmentation
         self.synchronize_timesteps = synchronize_timesteps
         self.dng = dng
+        self.timestep_distribution = timestep_distribution
+        self.use_time_reweighting = kwargs.get("use_time_reweighting", False)
 
     @property
     def device(self):
         return next(self.flow_model.parameters()).device
+
+    def _sample_timesteps(self, n: int) -> torch.Tensor:
+        """Sample timesteps from the configured distribution.
+
+        Args:
+            n: Number of timesteps to sample
+
+        Returns:
+            Tensor of shape (n,) with timesteps in [0, 1]
+        """
+        if self.timestep_distribution == "exponential":
+            # Exponential distribution: more samples near t=0
+            # Transform: t = 1 - exp(-3 * u) where u ~ Uniform(0, 1)
+            # This gives higher density near t=0 for better denoising
+            return 1 - torch.exp(-3 * torch.rand(n, device=self.device))
+        else:
+            # Default: uniform distribution
+            return torch.rand(n, device=self.device)
+
+    def _compute_time_weights(self, times: torch.Tensor, eps: float = 0.01) -> torch.Tensor:
+        """Compute time-based loss weights using SNR-inspired weighting.
+
+        Gives higher weight to timesteps near t=0 and t=1 where denoising is critical.
+        weight(t) = 1 / (t * (1 - t) + eps)
+
+        Args:
+            times: Tensor of shape (B,) with timesteps in [0, 1]
+            eps: Small constant for numerical stability
+
+        Returns:
+            Tensor of shape (B,) with normalized weights
+        """
+        weights = 1.0 / (times * (1 - times) + eps)
+        # Normalize weights to have mean 1.0 (so total loss magnitude stays similar)
+        weights = weights / weights.mean()
+        return weights
 
     def preconditioned_network_forward(
         self,
@@ -381,13 +420,13 @@ class AtomFlowMatching(Module):
         prim_slab_mask = feats["prim_slab_atom_pad_mask"]
         ads_mask = feats["ads_atom_pad_mask"]
 
-        # Sample timesteps
+        # Sample timesteps using configured distribution
         if self.synchronize_timesteps:
-            times = torch.rand(batch_size, device=self.device).repeat_interleave(
+            times = self._sample_timesteps(batch_size).repeat_interleave(
                 multiplicity, 0
             )
         else:
-            times = torch.rand(batch_size * multiplicity, device=self.device)
+            times = self._sample_timesteps(batch_size * multiplicity)
 
         # Sample prior (prim_slab_coords_0, ads_coords_0, lattice_0, supercell_matrix_0, scaling_factor_0) from prior_sampler
         sampler_data = {
@@ -577,6 +616,18 @@ class AtomFlowMatching(Module):
         scaling_factor_loss = loss_fn(
             pred_scaling_factor, true_scaling_factor, reduction="none"
         )
+
+        # Apply time-based loss reweighting if enabled
+        if self.use_time_reweighting and "times" in out_dict:
+            time_weights = self._compute_time_weights(out_dict["times"])
+            prim_slab_coord_loss = prim_slab_coord_loss * time_weights
+            ads_coord_loss = ads_coord_loss * time_weights
+            ads_center_loss = ads_center_loss * time_weights
+            ads_rel_loss = ads_rel_loss * time_weights
+            length_loss = length_loss * time_weights
+            angle_loss = angle_loss * time_weights
+            supercell_loss = supercell_loss * time_weights
+            scaling_factor_loss = scaling_factor_loss * time_weights
 
         loss_dict = {
             # Per-sample losses of shape (batch_size * multiplicity,)

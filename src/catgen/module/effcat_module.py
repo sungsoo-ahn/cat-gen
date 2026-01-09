@@ -35,6 +35,7 @@ from src.catgen.models.loss.validation import (
     get_uma_calculator,
 )
 from src.catgen.models.loss.utils import stratify_loss_by_time
+from src.catgen.models.utils import ExponentialMovingAverage
 from src.catgen.module.flow import AtomFlowMatching
 from src.catgen.scripts.assemble import assemble
 
@@ -52,6 +53,8 @@ class EffCatModule(LightningModule):
         predict_args: Optional[dict[str, Any]] = None,
         use_kernels: bool = False,
         dng: bool = False,
+        use_ema: bool = False,
+        ema_decay: float = 0.9999,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -127,6 +130,14 @@ class EffCatModule(LightningModule):
                 self.n_prim_slab_atoms_hist = [0.0] + [1.0/20]*20
                 self.max_n_prim_slab_atoms = 20
 
+        # EMA (Exponential Moving Average) for improved generation quality
+        self.use_ema = use_ema
+        self.ema_decay = ema_decay
+        self._ema: Optional[ExponentialMovingAverage] = None
+        if self.use_ema:
+            # EMA will be initialized after model is moved to device (in setup or first training step)
+            rank_zero_info(f"| EMA enabled with decay={ema_decay}")
+
     def setup(self, stage: str) -> None:
         """Set the model for training, validation and inference."""
         if stage == "predict" and not (
@@ -134,6 +145,16 @@ class EffCatModule(LightningModule):
             and torch.cuda.get_device_properties(torch.device("cuda")).major >= 8
         ):
             self.use_kernels = False
+
+        # Initialize EMA if enabled (after model is on device)
+        if self.use_ema and self._ema is None:
+            self._ema = ExponentialMovingAverage(
+                self.structure_module.parameters(),
+                decay=self.ema_decay,
+            )
+            # Move shadow params to the same device as the model
+            self._ema.to(self.device)
+            rank_zero_info(f"| EMA initialized with {len(self._ema.shadow_params)} shadow parameters on {self.device}")
 
     def _prepare_dng_sampling_feats(
         self,
@@ -259,11 +280,38 @@ class EffCatModule(LightningModule):
                     rank_zero_info("| [WARNING] Optimizer states list is empty")
             else:
                 rank_zero_info("| [WARNING] No optimizer_states found in checkpoint - starting fresh")
-            
+
             if "global_step" in checkpoint:
                 rank_zero_info(f"| [CHECKPOINT] Resuming from global_step: {checkpoint['global_step']}")
             if "epoch" in checkpoint:
                 rank_zero_info(f"| [CHECKPOINT] Resuming from epoch: {checkpoint['epoch']}")
+
+        # Load EMA state if present
+        if self.use_ema and "ema_state" in checkpoint:
+            if self._ema is None:
+                # Initialize EMA first
+                self._ema = ExponentialMovingAverage(
+                    self.structure_module.parameters(),
+                    decay=self.ema_decay,
+                )
+            self._ema.load_state_dict(checkpoint["ema_state"], device=self.device)
+            rank_zero_info("| [CHECKPOINT] EMA state loaded")
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Save EMA state to checkpoint."""
+        if self.use_ema and self._ema is not None:
+            checkpoint["ema_state"] = self._ema.state_dict()
+
+    def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
+        """Update EMA after each training step (after optimizer step)."""
+        if self.use_ema and self._ema is not None:
+            self._ema.update(self.structure_module.parameters())
+
+    def on_validation_epoch_start(self) -> None:
+        """Swap to EMA weights before validation."""
+        if self.use_ema and self._ema is not None:
+            self._ema.store(self.structure_module.parameters())
+            self._ema.copy_to(self.structure_module.parameters())
 
     def forward(
         self,
@@ -1031,6 +1079,10 @@ class EffCatModule(LightningModule):
             self.val_smact_validity.reset()
             self.val_crystal_validity.reset()
             self.validation_step_outputs.clear()  # free memory
+
+        # Restore original weights after validation (EMA was swapped in on_validation_epoch_start)
+        if self.use_ema and self._ema is not None:
+            self._ema.restore(self.structure_module.parameters())
 
     def test_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
         """Test step - same as validation step."""

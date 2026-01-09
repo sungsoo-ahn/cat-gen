@@ -1,41 +1,38 @@
-# Flattened configuration for MinCatFlow (original implementation)
-# Converted from Hydra configs to simple YAML per CLAUDE.md guidelines
+# Overfitting test configuration
+# Purpose: Train on a few samples to verify the model can memorize them
+# If the model is working correctly, training loss should approach zero
 
-# Required field per CLAUDE.md
-output_dir: "data/catgen/default"
+output_dir: "data/catgen/overfit_test"
 
-# Experiment metadata
 experiment:
-  name: "mincatflow_catgen"
+  name: "overfit_test"
   version: "1.0.0"
   seed: 42
   deterministic: true
 
-# Version tracking for WandB comparison
-code_version: "catgen"
+code_version: "overfit"
 
-# Data configuration
+# Data configuration - small batch for overfitting
 data:
   train_lmdb_path: "dataset/train/dataset.lmdb"
   val_lmdb_path: "dataset/val_id/dataset.lmdb"
   test_lmdb_path: null
   batch_size:
-    train: 512
-    val: 512
-    test: 512
+    train: 8  # Small batch size
+    val: 8
+    test: 8
   num_workers:
-    train: 16
-    val: 16
-    test: 16
+    train: 4
+    val: 4
+    test: 4
   preload_to_ram: true
   use_pyg: false
 
-# Model architecture dimensions (reduced for fast testing)
+# Model architecture (same as default for fair comparison)
 model:
   atom_s: 256
   token_s: 256
 
-  # Flow model arguments
   flow_model_args:
     atom_encoder_depth: 2
     atom_encoder_heads: 4
@@ -44,21 +41,17 @@ model:
     token_transformer_heads: 4
     atom_decoder_depth: 2
     atom_decoder_heads: 4
-    attention_impl: "flash"  # "pytorch", "xformers", "manual", "flash" (uses scaled_dot_product_attention)
+    attention_impl: "flash"
     activation_checkpointing: false
-    dng: true  # Dynamic Nuclear Graph mode
+    dng: true
 
-  # Prior sampler arguments (computed from dataset statistics)
   prior_sampler_args:
     coord_std: 1.0
-    # LogNormal parameters for lattice lengths (a, b, c)
     lognormal_loc: [1.5845935274470484, 1.8048289191348783, 2.0629395870811051]
     lognormal_scale: [0.3456883565588731, 0.4261945604282258, 0.4394933811412375]
-    # Uniform parameters for lattice angles (alpha, beta, gamma)
     uniform_low: 60.0
     uniform_high: 120.0
     uniform_eps: 0.1
-    # Supercell matrix normalization parameters
     supercell_mean: [
       [-0.026726, 0.078970, -0.065390],
       [-0.133529, 0.188983, -0.132132],
@@ -69,44 +62,44 @@ model:
       [1.223385, 1.383904, 1.337392],
       [1.373271, 1.452034, 1.045282]
     ]
-    # Prim slab coordinate standardization parameters
     prim_slab_coord_mean: [3.298159, 4.591314, 5.311862]
     prim_slab_coord_std: [2.842205, 3.540208, 4.057026]
-    # Adsorbate coordinate standardization parameters
     ads_coord_mean: [0.007402, -0.702398, 0.934607]
     ads_coord_std: [8.247430, 9.035212, 9.979235]
-    # Scaling factor standardization parameters (computed from training data)
     scaling_factor_mean: 3.422560
     scaling_factor_std: 0.473372
 
-  # Flow process arguments
   flow_process_args:
     num_sampling_steps: 50
-    coordinate_augmentation: true
+    coordinate_augmentation: false  # Disable augmentation for pure overfitting
     synchronize_timesteps: false
     compile_model: false
-    timestep_distribution: "exponential"  # "uniform" or "exponential" - exponential samples more near t=0
-    use_time_reweighting: true  # Apply SNR-based time weighting to losses
+    timestep_distribution: "uniform"  # Uniform for simpler training signal
+    use_time_reweighting: false  # Disable for simpler loss
 
-  # Use optimized kernels
   use_kernels: false
 
-# Training configuration
+# Training configuration optimized for overfitting
 training:
-  max_epochs: 20
+  max_epochs: 1000  # More epochs for overfitting
   accelerator: "gpu"
   devices: 1
   strategy: "auto"
   precision: "bf16-mixed"
   accumulate_grad_batches: 1
-  num_sanity_val_steps: 2
+  num_sanity_val_steps: 0  # Skip sanity check
   gradient_clip_val: 10.0
   gradient_clip_algorithm: "norm"
   val_check_interval: 1.0
+  check_val_every_n_epoch: 1000  # Only validate at end
+
+  # Limit to 1 batch per epoch (8 samples)
+  limit_train_batches: 1
+  limit_val_batches: 1  # Run validation on 1 batch
 
   # Loss configuration
   train_multiplicity: 1
-  loss_type: "l2"  # "l1" or "l2"
+  loss_type: "l2"
   prim_slab_coord_loss_weight: 1.0
   ads_coord_loss_weight: 1.0
   length_loss_weight: 1.0
@@ -114,44 +107,42 @@ training:
   supercell_matrix_loss_weight: 1.0
   supercell_matrix_cosine_reg_weight: 0.0
   scaling_factor_loss_weight: 1.0
-  prim_slab_element_loss_weight: 5.0  # Used when dng=True
+  prim_slab_element_loss_weight: 5.0
 
-  # Optimizer
-  lr: 0.0001
-  weight_decay: 0.01
+  # Optimizer - higher LR, no weight decay for overfitting
+  lr: 0.01  # 100x higher than default
+  weight_decay: 0.0  # No regularization
   adam_beta1: 0.9
   adam_beta2: 0.999
 
-  # EMA (Exponential Moving Average) for improved generation quality
-  use_ema: true
+  # Disable EMA for pure training signal observation
+  use_ema: false
   ema_decay: 0.9999
 
-  # Learning rate scheduler
+  # No scheduler - constant LR
   scheduler:
-    type: "cosine_warmup"  # "none", "cosine_warmup", "linear_warmup"
-    warmup_steps: 10000  # Number of warmup steps (or use warmup_epochs)
-    warmup_epochs: null  # Alternative: warmup as fraction of epochs (overrides warmup_steps if set)
-    min_lr_ratio: 0.01  # Minimum LR as ratio of initial LR (for cosine annealing)
+    type: "none"
+    warmup_steps: 0
+    warmup_epochs: null
+    min_lr_ratio: 1.0
 
   # Checkpointing
   checkpoint:
-    save_top_k: 3
+    save_top_k: 1
     save_last: true
-    monitor: "val/total_loss"
+    monitor: "train/total_loss"  # Monitor train loss for overfitting
     mode: "min"
 
-# Validation configuration
+# Validation configuration - run at end to check sample quality
 validation:
-  sample_every_n_epochs: 2
+  sample_every_n_epochs: 1  # Sample when validation runs (only at end)
   flow_samples: 1
   sampling_steps: 50
   sampling_center_coords: false
   timeout: 120
   num_workers: 4
-  # DNG-specific settings
   n_prim_slab_atoms_histogram_path: "primitive_atom_distribution.json"
   max_n_prim_slab_atoms: null
-  # Adsorption energy evaluation
   compute_adsorption: false
   adsorption_device: "cuda"
   adsorption_model: "uma-m-1p1"
@@ -160,9 +151,8 @@ validation:
     ltol: 0.3
     stol: 0.5
     angle_tol: 10.0
-  # W&B structure visualization
-  log_structures_to_wandb: true
-  max_structures_to_log: 5
+  log_structures_to_wandb: false
+  max_structures_to_log: 0
 
 # Prediction configuration
 prediction:
@@ -171,13 +161,13 @@ prediction:
   sampling_center_coords: false
   refine_final: false
 
-# WandB configuration
+# WandB enabled to track overfitting
 wandb:
   enabled: true
   project: "CatGen"
-  entity: null  # Your WandB username/team
-  mode: "online"  # "online", "offline", "disabled"
-  tags: []
-  notes: ""
+  entity: null
+  mode: "online"
+  tags: ["overfit"]
+  notes: "Overfitting test to verify model training"
   watch_gradients: true
-  watch_freq: 100
+  watch_freq: 50
