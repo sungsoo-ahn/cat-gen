@@ -475,6 +475,10 @@ class EffCatModule(LightningModule):
         # Use context manager for cleaner OOM handling
         out = None
         with handle_cuda_oom("validation sampling"):
+            # Set fixed seed for deterministic validation sampling (for overfitting tests)
+            val_sampling_seed = self.validation_args.get("sampling_seed", None)
+            if val_sampling_seed is not None:
+                torch.manual_seed(val_sampling_seed)
             out = self(
                 batch,
                 num_sampling_steps=self.validation_args["sampling_steps"],

@@ -257,6 +257,7 @@ class AtomFlowMatching(Module):
         self.timestep_distribution = timestep_distribution
         self.use_time_reweighting = kwargs.get("use_time_reweighting", False)
         self.fixed_timestep = fixed_timestep  # For overfitting tests
+        self.fixed_prior_seed = kwargs.get("fixed_prior_seed", None)  # For deterministic prior in overfitting tests
 
     @property
     def device(self):
@@ -441,6 +442,9 @@ class AtomFlowMatching(Module):
             "ads_cart_coords": feats["ads_cart_coords"].repeat_interleave(multiplicity, 0),
             "ads_atom_mask": ads_mask.repeat_interleave(multiplicity, 0),
         }
+        # Seed random generator for deterministic prior sampling in overfitting tests
+        if self.fixed_prior_seed is not None:
+            torch.manual_seed(self.fixed_prior_seed)
         priors = self.prior_sampler.sample(sampler_data)
         prim_slab_coords_0 = priors["prim_slab_coords_0"]  # (B * multiplicity, N, 3) raw space
         ads_coords_0 = priors["ads_coords_0"]  # (B * multiplicity, M, 3) raw space

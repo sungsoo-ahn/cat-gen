@@ -15,7 +15,7 @@ code_version: "overfit"
 # Data configuration - small batch for overfitting
 data:
   train_lmdb_path: "dataset/train/dataset.lmdb"
-  val_lmdb_path: "dataset/val_id/dataset.lmdb"
+  val_lmdb_path: "dataset/train/dataset.lmdb"  # Same as train for overfitting validation
   test_lmdb_path: null
   batch_size:
     train: 8  # Small batch size
@@ -76,13 +76,14 @@ model:
     compile_model: false
     timestep_distribution: "uniform"  # Uniform for simpler training signal
     use_time_reweighting: false  # Disable for simpler loss
-    fixed_timestep: 0.5  # Fix timestep for deterministic training (critical for overfitting)
+    # Note: fixed_timestep removed - model needs to learn at all t values for sampling to work
+    fixed_prior_seed: 42  # Fix prior noise for deterministic training (critical for overfitting)
 
   use_kernels: false
 
 # Training configuration optimized for overfitting
 training:
-  max_epochs: 1000  # More epochs for overfitting
+  max_epochs: 3000  # More epochs for overfitting
   accelerator: "gpu"
   devices: 1
   strategy: "auto"
@@ -92,7 +93,7 @@ training:
   gradient_clip_val: 10.0
   gradient_clip_algorithm: "norm"
   val_check_interval: 1.0
-  check_val_every_n_epoch: 1000  # Only validate at end
+  check_val_every_n_epoch: 3000  # Only validate at end
 
   # Limit to 1 batch per epoch (8 samples)
   limit_train_batches: 1
@@ -140,6 +141,7 @@ validation:
   flow_samples: 1
   sampling_steps: 50
   sampling_center_coords: false
+  sampling_seed: 42  # Fixed seed for deterministic validation sampling (critical for overfitting)
   timeout: 120
   num_workers: 4
   n_prim_slab_atoms_histogram_path: "primitive_atom_distribution.json"
