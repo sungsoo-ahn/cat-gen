@@ -6,8 +6,7 @@ import random
 import math
 import heapq
 from collections import deque
-from typing import Optional, Callable, Sequence
-from pathlib import Path
+from typing import Optional, Callable
 
 import numpy as np
 import torch
@@ -214,6 +213,7 @@ class LMDBDataModule(pl.LightningDataModule):
         num_workers: DictConfig = None,
         preload_to_ram: bool = True,
         use_pyg: bool = False,
+        train_shuffle: bool = True,
     ):
         super().__init__()
 
@@ -238,6 +238,7 @@ class LMDBDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.preload_to_ram = preload_to_ram
         self.use_pyg = use_pyg
+        self.train_shuffle = train_shuffle
 
         self.train_dataset: Optional[Dataset] = None
         self.val_dataset: Optional[Dataset] = None
@@ -272,8 +273,7 @@ class LMDBDataModule(pl.LightningDataModule):
         """Get the appropriate collate function."""
         if self.use_pyg:
             return collate_pyg_with_dynamic_padding
-        else:
-            return collate_fn_with_dynamic_padding
+        return collate_fn_with_dynamic_padding
 
     def _create_dataloader(
         self,
@@ -305,12 +305,12 @@ class LMDBDataModule(pl.LightningDataModule):
             pin_memory=True,
         )
 
-    def train_dataloader(self, shuffle: bool = True) -> DataLoader:
+    def train_dataloader(self) -> DataLoader:
         return self._create_dataloader(
             dataset=self.train_dataset,
             batch_size=self.batch_size.train,
             num_workers=self.num_workers.train,
-            shuffle=shuffle,
+            shuffle=self.train_shuffle,
         )
 
     def val_dataloader(self) -> Optional[DataLoader]:

@@ -1,24 +1,13 @@
 from __future__ import annotations
 
-import math
-import os
-import pickle
-import pandas as pd
 import ast
-import lmdb
+
 import numpy as np
-import torch
-import itertools
-import functools
-from collections import Counter, defaultdict
-from pymatgen.analysis.structure_matcher import StructureMatcher
-from pymatgen.core.structure import Structure
-from pymatgen.core.sites import PeriodicSite
-from pymatgen.io.ase import AseAtomsAdaptor
-from pymatgen.util.coord import lattice_points_in_supercell
+import pandas as pd
 from ase import Atoms
-from ase.io import write
-from pymatgen.core import Lattice, Structure
+from pymatgen.analysis.structure_matcher import StructureMatcher
+from pymatgen.core import Structure
+from pymatgen.io.ase import AseAtomsAdaptor
 
 def calculate_rmsd_pymatgen(
     struct1: Atoms | Structure,

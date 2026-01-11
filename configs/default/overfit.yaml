@@ -12,21 +12,22 @@ experiment:
 
 code_version: "overfit"
 
-# Data configuration - small batch for overfitting
+# Data configuration - single sample for overfitting
 data:
   train_lmdb_path: "dataset/train/dataset.lmdb"
   val_lmdb_path: "dataset/train/dataset.lmdb"  # Same as train for overfitting validation
   test_lmdb_path: null
   batch_size:
-    train: 8  # Small batch size
-    val: 8
-    test: 8
+    train: 1  # Single sample for maximum overfitting
+    val: 1
+    test: 1
   num_workers:
-    train: 4
-    val: 4
-    test: 4
+    train: 0  # Single worker for deterministic ordering
+    val: 0
+    test: 0
   preload_to_ram: true
   use_pyg: false
+  train_shuffle: false  # CRITICAL: Disable shuffle to see same sample each epoch
 
 # Model architecture (same as default for fair comparison)
 model:
@@ -83,19 +84,19 @@ model:
 
 # Training configuration optimized for overfitting
 training:
-  max_epochs: 3000  # More epochs for overfitting
+  max_epochs: 5000  # Many epochs for single-sample overfitting
   accelerator: "gpu"
   devices: 1
   strategy: "auto"
   precision: "bf16-mixed"
   accumulate_grad_batches: 1
   num_sanity_val_steps: 0  # Skip sanity check
-  gradient_clip_val: 10.0
+  gradient_clip_val: 1.0  # Stricter gradient clipping for stability
   gradient_clip_algorithm: "norm"
   val_check_interval: 1.0
-  check_val_every_n_epoch: 3000  # Only validate at end
+  check_val_every_n_epoch: 5000  # Only validate at end
 
-  # Limit to 1 batch per epoch (8 samples)
+  # Limit to 1 batch per epoch (1 sample with batch_size=1)
   limit_train_batches: 1
   limit_val_batches: 1  # Run validation on 1 batch
 
@@ -111,8 +112,8 @@ training:
   scaling_factor_loss_weight: 1.0
   prim_slab_element_loss_weight: 5.0
 
-  # Optimizer - higher LR, no weight decay for overfitting
-  lr: 0.001  # 10x higher than default
+  # Optimizer - high initial LR with cosine decay
+  lr: 0.01  # Higher LR for faster convergence
   weight_decay: 0.0  # No regularization
   adam_beta1: 0.9
   adam_beta2: 0.999
@@ -121,12 +122,12 @@ training:
   use_ema: false
   ema_decay: 0.9999
 
-  # No scheduler - constant LR
+  # Cosine annealing scheduler for smooth convergence
   scheduler:
-    type: "none"
-    warmup_steps: 0
+    type: "cosine"
+    warmup_steps: 100
     warmup_epochs: null
-    min_lr_ratio: 1.0
+    min_lr_ratio: 0.01  # Decay to 1% of initial LR
 
   # Checkpointing
   checkpoint:

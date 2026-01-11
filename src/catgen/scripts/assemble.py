@@ -21,16 +21,12 @@ from typing import Dict, Any, List, Optional, Union, Tuple
 import numpy as np
 import torch
 from ase import Atoms
-from pymatgen.core import Structure, Lattice
+from pymatgen.core import Lattice, Structure
 from pymatgen.io.ase import AseAtomsAdaptor
-from ase.geometry import cellpar_to_cell
-from ase.cell import Cell
 
-import ase
-import numpy as np
 
 def tag_surface_atoms(
-    slab_atoms: ase.Atoms = None,
+    slab_atoms: Atoms = None,
 ):
     """
     Sets the tags of an `ase.Atoms` object. Any atom that we consider a "bulk"

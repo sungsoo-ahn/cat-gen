@@ -7,9 +7,10 @@ Usage:
 """
 
 import argparse
-import shutil
 import random
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -126,23 +127,16 @@ def create_datamodule(config: dict) -> LMDBDataModule:
     """Create LMDBDataModule from config."""
     data_config = config["data"]
 
-    # Create batch_size and num_workers as SimpleNamespace-like objects
-    class ConfigDict:
-        def __init__(self, d):
-            for k, v in d.items():
-                setattr(self, k, v)
-
-    datamodule = LMDBDataModule(
+    return LMDBDataModule(
         train_lmdb_path=data_config["train_lmdb_path"],
         val_lmdb_path=data_config.get("val_lmdb_path"),
         test_lmdb_path=data_config.get("test_lmdb_path"),
-        batch_size=ConfigDict(data_config["batch_size"]),
-        num_workers=ConfigDict(data_config["num_workers"]),
+        batch_size=SimpleNamespace(**data_config["batch_size"]),
+        num_workers=SimpleNamespace(**data_config["num_workers"]),
         preload_to_ram=data_config.get("preload_to_ram", True),
         use_pyg=data_config.get("use_pyg", False),
+        train_shuffle=data_config.get("train_shuffle", True),
     )
-
-    return datamodule
 
 
 def main(config_path: str, overwrite: bool = False, debug: bool = False):

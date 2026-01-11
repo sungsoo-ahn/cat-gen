@@ -1,12 +1,5 @@
 import torch
-import numpy as np
 
-# def regularize_singular_values(matrix, min_sv=0.1):
-
-#     U, S, Vh = torch.linalg.svd(matrix)
-
-#     S = torch.clamp(S, min=min_sv)
-#     return U @ torch.diag(S) @ Vh
 
 def refine_sc_mat(pred_matrix, min_det=1.0):
     """

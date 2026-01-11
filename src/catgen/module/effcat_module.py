@@ -32,6 +32,7 @@ from src.catgen.models.loss.validation import (
     compute_structural_validity_single,
     compute_prim_structural_validity_single,
     compute_comprehensive_validity_single,
+    compute_adsorption_and_validity_single,
     get_uma_calculator,
 )
 from src.catgen.models.loss.utils import stratify_loss_by_time
