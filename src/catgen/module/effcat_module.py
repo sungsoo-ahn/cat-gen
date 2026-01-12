@@ -17,6 +17,7 @@ from pymatgen.analysis.structure_matcher import StructureMatcher
 from tqdm import tqdm
 
 from src.catgen.data.prior import CatPriorSampler
+from src.catgen.data.conversions import virtual_coords_to_lattice_and_supercell
 from src.catgen.module.parallel_utils import (
     handle_cuda_oom,
     expand_tensor_for_multiplicity,
@@ -395,12 +396,10 @@ class EffCatModule(LightningModule):
             * flow_loss_dict["prim_slab_coord_loss"].mean()
             + self.training_args["ads_coord_loss_weight"]
             * flow_loss_dict["ads_coord_loss"].mean()
-            + self.training_args["length_loss_weight"]
-            * flow_loss_dict["length_loss"].mean()
-            + self.training_args["angle_loss_weight"]
-            * flow_loss_dict["angle_loss"].mean()
-            + self.training_args["supercell_matrix_loss_weight"]
-            * flow_loss_dict["supercell_matrix_loss"].mean()
+            + self.training_args["prim_virtual_loss_weight"]
+            * flow_loss_dict["prim_virtual_loss"].mean()
+            + self.training_args["supercell_virtual_loss_weight"]
+            * flow_loss_dict["supercell_virtual_loss"].mean()
             + self.training_args["scaling_factor_loss_weight"]
             * flow_loss_dict["scaling_factor_loss"].mean()
         )
@@ -516,12 +515,19 @@ class EffCatModule(LightningModule):
             # OOM occurred, skip this batch
             return
 
+        # Convert virtual coords to lattice params and supercell matrix for validation
+        sampled_prim_virtual_coords = out["sampled_prim_virtual_coords"]
+        sampled_supercell_virtual_coords = out["sampled_supercell_virtual_coords"]
+        sampled_lattices, sampled_supercell_matrices = virtual_coords_to_lattice_and_supercell(
+            sampled_prim_virtual_coords, sampled_supercell_virtual_coords
+        )
+
         # Aggregate outputs
         return_dict = {
             "sampled_prim_slab_coords": out["sampled_prim_slab_coords"],
             "sampled_ads_coords": out["sampled_ads_coords"],
-            "sampled_lattices": out["sampled_lattice"],
-            "sampled_supercell_matrices": out["sampled_supercell_matrix"],
+            "sampled_lattices": sampled_lattices,
+            "sampled_supercell_matrices": sampled_supercell_matrices,
             "sampled_scaling_factors": out["sampled_scaling_factor"],
             "true_prim_slab_coords": batch["prim_slab_cart_coords"],
             "true_ads_coords": batch["ads_cart_coords"],
@@ -1358,8 +1364,8 @@ class EffCatModule(LightningModule):
             "exception": False,
             "generated_prim_slab_coords": out["sampled_prim_slab_coords"],
             "generated_ads_coords": out["sampled_ads_coords"],
-            "generated_lattices": out["sampled_lattice"],
-            "generated_supercell_matrices": out["sampled_supercell_matrix"],
+            "generated_prim_virtual_coords": out["sampled_prim_virtual_coords"],
+            "generated_supercell_virtual_coords": out["sampled_supercell_virtual_coords"],
             "generated_scaling_factors": out["sampled_scaling_factor"],
             "prim_slab_atom_types": batch["ref_prim_slab_element"],
             "ads_atom_types": batch["ref_ads_element"],

@@ -6,8 +6,8 @@ prediction_output structure:
         "exception": False,
         "generated_prim_slab_coords": (B*M, N, 3) - cartesian coordinates
         "generated_ads_coords": (B*M, A, 3) - cartesian coordinates
-        "generated_lattices": (B*M, 6) - (a, b, c, alpha, beta, gamma)
-        "generated_supercell_matrices": (B*M, 3, 3) or (B*M, 9)
+        "generated_prim_virtual_coords": (B*M, 3, 3) - primitive lattice vectors (row vectors)
+        "generated_supercell_virtual_coords": (B*M, 3, 3) - supercell lattice vectors (row vectors)
         "generated_scaling_factors": (B*M,)
         "prim_slab_atom_types": (B, N) - atomic numbers
         "ads_atom_types": (B, A) - atomic numbers
@@ -23,6 +23,8 @@ import torch
 from ase import Atoms
 from pymatgen.core import Lattice, Structure
 from pymatgen.io.ase import AseAtomsAdaptor
+
+from src.catgen.data.conversions import virtual_coords_to_lattice_and_supercell
 
 
 def tag_surface_atoms(
@@ -218,11 +220,25 @@ def assemble_batch(
         if isinstance(x, torch.Tensor):
             return x.cpu().numpy()
         return x
-    
+
+    # Ensure tensor for conversion (needed for virtual_coords_to_lattice_and_supercell)
+    def to_tensor(x):
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x).float()
+        return x
+
     generated_prim_slab_coords = to_numpy(prediction_output["generated_prim_slab_coords"])
     generated_ads_coords = to_numpy(prediction_output["generated_ads_coords"])
-    generated_lattices = to_numpy(prediction_output["generated_lattices"])
-    generated_supercell_matrices = to_numpy(prediction_output["generated_supercell_matrices"])
+
+    # Convert virtual coords to lattice params and supercell matrix
+    prim_virtual_coords = to_tensor(prediction_output["generated_prim_virtual_coords"])
+    supercell_virtual_coords = to_tensor(prediction_output["generated_supercell_virtual_coords"])
+    generated_lattices, generated_supercell_matrices = virtual_coords_to_lattice_and_supercell(
+        prim_virtual_coords, supercell_virtual_coords
+    )
+    generated_lattices = to_numpy(generated_lattices)
+    generated_supercell_matrices = to_numpy(generated_supercell_matrices)
+
     generated_scaling_factors = to_numpy(prediction_output["generated_scaling_factors"])
     prim_slab_atom_types = to_numpy(prediction_output["prim_slab_atom_types"])
     ads_atom_types = to_numpy(prediction_output["ads_atom_types"])

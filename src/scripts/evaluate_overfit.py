@@ -24,6 +24,7 @@ from ase.io import write as ase_write
 from src.catgen.module.effcat_module import EffCatModule
 from src.catgen.data.lmdb_dataset import LMDBCachedDataset, collate_fn_with_dynamic_padding
 from src.catgen.scripts.assemble import assemble
+from src.catgen.data.conversions import virtual_coords_to_lattice_and_supercell
 
 
 def load_config(config_path: str) -> dict:
@@ -122,9 +123,16 @@ def compare_structures(
     # Extract numpy arrays
     gen_prim_coords = generated["sampled_prim_slab_coords"].cpu().numpy()[0]
     gen_ads_coords = generated["sampled_ads_coords"].cpu().numpy()[0]
-    gen_lattice = generated["sampled_lattice"].cpu().numpy()[0]
-    gen_supercell = generated["sampled_supercell_matrix"].cpu().numpy()[0]
     gen_scaling = generated["sampled_scaling_factor"].cpu().numpy()[0]
+
+    # Convert virtual coords to lattice params and supercell matrix
+    gen_prim_virtual = generated["sampled_prim_virtual_coords"]
+    gen_supercell_virtual = generated["sampled_supercell_virtual_coords"]
+    gen_lattice_tensor, gen_supercell_tensor = virtual_coords_to_lattice_and_supercell(
+        gen_prim_virtual, gen_supercell_virtual
+    )
+    gen_lattice = gen_lattice_tensor.cpu().numpy()[0]
+    gen_supercell = gen_supercell_tensor.cpu().numpy()[0]
 
     true_prim_coords = batch["prim_slab_cart_coords"].cpu().numpy()[0]
     true_ads_coords = batch["ads_cart_coords"].cpu().numpy()[0]
@@ -177,9 +185,16 @@ def log_to_wandb(
     # Extract arrays
     gen_prim_coords = generated["sampled_prim_slab_coords"].cpu().numpy()[0]
     gen_ads_coords = generated["sampled_ads_coords"].cpu().numpy()[0]
-    gen_lattice = generated["sampled_lattice"].cpu().numpy()[0]
-    gen_supercell = generated["sampled_supercell_matrix"].cpu().numpy()[0]
     gen_scaling = generated["sampled_scaling_factor"].cpu().numpy()[0]
+
+    # Convert virtual coords to lattice params and supercell matrix
+    gen_prim_virtual = generated["sampled_prim_virtual_coords"]
+    gen_supercell_virtual = generated["sampled_supercell_virtual_coords"]
+    gen_lattice_tensor, gen_supercell_tensor = virtual_coords_to_lattice_and_supercell(
+        gen_prim_virtual, gen_supercell_virtual
+    )
+    gen_lattice = gen_lattice_tensor.cpu().numpy()[0]
+    gen_supercell = gen_supercell_tensor.cpu().numpy()[0]
 
     true_prim_coords = batch["prim_slab_cart_coords"].cpu().numpy()[0]
     true_ads_coords = batch["ads_cart_coords"].cpu().numpy()[0]
@@ -257,19 +272,22 @@ def log_to_wandb(
                 step_coords = trajectory[step_idx, 0]
 
                 try:
+                    # Convert virtual coord trajectory to lattice/supercell
+                    step_prim_virtual = generated["prim_virtual_coord_trajectory"][step_idx:step_idx+1]
+                    step_supercell_virtual = generated["supercell_virtual_coord_trajectory"][step_idx:step_idx+1]
+                    step_lattice_tensor, step_supercell_tensor = virtual_coords_to_lattice_and_supercell(
+                        step_prim_virtual, step_supercell_virtual
+                    )
+                    step_lattice = step_lattice_tensor.cpu().numpy()[0]
+                    step_supercell = step_supercell_tensor.cpu().numpy()[0]
+
                     step_atoms, _ = assemble(
                         generated_prim_slab_coords=step_coords,
                         generated_ads_coords=generated["ads_coord_trajectory"]
                         .cpu()
                         .numpy()[step_idx, 0],
-                        generated_lattice=generated["lattice_trajectory"]
-                        .cpu()
-                        .numpy()[step_idx, 0],
-                        generated_supercell_matrix=generated[
-                            "supercell_matrix_trajectory"
-                        ]
-                        .cpu()
-                        .numpy()[step_idx, 0],
+                        generated_lattice=step_lattice,
+                        generated_supercell_matrix=step_supercell,
                         generated_scaling_factor=generated["scaling_factor_trajectory"]
                         .cpu()
                         .numpy()[step_idx, 0],

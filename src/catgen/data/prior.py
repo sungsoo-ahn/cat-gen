@@ -7,6 +7,7 @@ from torch import Tensor
 from torch.distributions import LogNormal, Uniform
 
 from src.catgen.constants import EPS_NUMERICAL
+from src.catgen.data.conversions import compute_virtual_coords
 
 
 class Normalizer:
@@ -71,16 +72,19 @@ class PriorSampler(Protocol):
 
 class CatPriorSampler:
     """Prior sampler for flow matching.
-    
+
     Samples all priors needed for flow matching:
     - prim_slab_coords_0: N(0, coord_std^2) in normalized space, then denormalized to raw space (Angstrom)
     - ads_coords_0: N(0, coord_std^2) in normalized space, then denormalized to raw space (Angstrom)
     - lattice_0: LogNormal (lengths) + Uniform (angles) - raw space (Angstrom, degrees)
     - supercell_matrix_0: N(0, 1) in normalized space, then denormalized to raw space
     - scaling_factor_0: N(0, coord_std^2) - Gaussian (raw space, no normalization)
-    
+    - prim_virtual_coords_0: Computed from lattice_0 (primitive lattice vectors)
+    - supercell_virtual_coords_0: Computed from prim_virtual_coords_0 and supercell_matrix_0
+
     Note: prim_slab_coords, ads_coords, and supercell_matrix are sampled in normalized space and then
     denormalized to raw space. Lattice uses non-Gaussian distributions in raw space. Scaling factor uses raw Gaussian prior.
+    Virtual coords are derived from lattice and supercell_matrix.
     """
 
     def __init__(
@@ -102,6 +106,11 @@ class CatPriorSampler:
         # Scaling factor standardization parameters (computed from train set)
         scaling_factor_mean: float = 3.422560,
         scaling_factor_std: float = 0.473372,
+        # Virtual coord normalization parameters (computed from train set)
+        prim_virtual_mean: List[List[float]] = None,
+        prim_virtual_std: List[List[float]] = None,
+        supercell_virtual_mean: List[List[float]] = None,
+        supercell_virtual_std: List[List[float]] = None,
     ):
         self.coord_std = coord_std
 
@@ -130,6 +139,19 @@ class CatPriorSampler:
 
         # Scaling factor normalizer
         self.scaling_factor_normalizer = Normalizer(scaling_factor_mean, scaling_factor_std)
+
+        # Virtual coord normalizers (default to identity if not provided)
+        if prim_virtual_mean is None:
+            prim_virtual_mean = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        if prim_virtual_std is None:
+            prim_virtual_std = [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]
+        if supercell_virtual_mean is None:
+            supercell_virtual_mean = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        if supercell_virtual_std is None:
+            supercell_virtual_std = [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]
+
+        self.prim_virtual_normalizer = Normalizer(prim_virtual_mean, prim_virtual_std)
+        self.supercell_virtual_normalizer = Normalizer(supercell_virtual_mean, supercell_virtual_std)
 
     def sample(self, data: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Sample from prior distributions for coords, lattice, and supercell matrix."""
@@ -180,12 +202,19 @@ class CatPriorSampler:
         scaling_factor_0_normalized = torch.randn(batch_size, device=device, dtype=dtype) * self.coord_std
         scaling_factor_0 = self.scaling_factor_normalizer.denormalize(scaling_factor_0_normalized)  # (B,)
 
+        # Compute virtual coords from lattice and supercell_matrix
+        prim_virtual_coords_0, supercell_virtual_coords_0 = compute_virtual_coords(
+            lattice_0, supercell_matrix_0
+        )  # Both (B, 3, 3) raw space
+
         return {
             "prim_slab_coords_0": prim_slab_coords_0,  # (B, N, 3) raw space (Angstrom)
             "ads_coords_0": ads_coords_0,  # (B, M, 3) raw space (Angstrom)
             "lattice_0": lattice_0,  # (B, 6) raw space (Angstrom, degrees)
             "supercell_matrix_0": supercell_matrix_0,  # (B, 3, 3) raw space
             "scaling_factor_0": scaling_factor_0,  # (B,) raw value
+            "prim_virtual_coords_0": prim_virtual_coords_0,  # (B, 3, 3) raw space
+            "supercell_virtual_coords_0": supercell_virtual_coords_0,  # (B, 3, 3) raw space
         }
 
     # Backward-compatible properties for direct attribute access
@@ -259,3 +288,19 @@ class CatPriorSampler:
     def denormalize_scaling_factor(self, scaling_factor_normalized: torch.Tensor) -> torch.Tensor:
         """Denormalize scaling factor. Delegates to scaling_factor_normalizer."""
         return self.scaling_factor_normalizer.denormalize(scaling_factor_normalized)
+
+    def normalize_prim_virtual(self, coords: torch.Tensor) -> torch.Tensor:
+        """Normalize primitive virtual coordinates. Delegates to prim_virtual_normalizer."""
+        return self.prim_virtual_normalizer.normalize(coords)
+
+    def denormalize_prim_virtual(self, coords_normalized: torch.Tensor) -> torch.Tensor:
+        """Denormalize primitive virtual coordinates. Delegates to prim_virtual_normalizer."""
+        return self.prim_virtual_normalizer.denormalize(coords_normalized)
+
+    def normalize_supercell_virtual(self, coords: torch.Tensor) -> torch.Tensor:
+        """Normalize supercell virtual coordinates. Delegates to supercell_virtual_normalizer."""
+        return self.supercell_virtual_normalizer.normalize(coords)
+
+    def denormalize_supercell_virtual(self, coords_normalized: torch.Tensor) -> torch.Tensor:
+        """Denormalize supercell virtual coordinates. Delegates to supercell_virtual_normalizer."""
+        return self.supercell_virtual_normalizer.denormalize(coords_normalized)

@@ -93,6 +93,43 @@ uv add scipy  # Never use pip install
    ```
 3. Results appear in the `output_dir` specified in config
 
+### GPU Usage - IMPORTANT
+
+**ALWAYS check GPU availability before running any GPU-related task:**
+
+```bash
+# Check GPU status and usage
+nvidia-smi
+
+# Quick check for available GPUs (shows GPU memory usage)
+nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv
+```
+
+**Before running training or GPU experiments:**
+1. Run `nvidia-smi` to see which GPUs are in use
+2. Check memory usage - a GPU with >1GB memory used is likely busy
+3. Check GPU utilization percentage
+4. Select an available GPU using `CUDA_VISIBLE_DEVICES`:
+   ```bash
+   # Use GPU 0 only
+   CUDA_VISIBLE_DEVICES=0 uv run python src/scripts/train.py configs/config.yaml
+
+   # Use GPU 2 only
+   CUDA_VISIBLE_DEVICES=2 uv run python src/scripts/train.py configs/config.yaml
+
+   # Use multiple GPUs
+   CUDA_VISIBLE_DEVICES=0,1 uv run python src/scripts/train.py configs/config.yaml
+   ```
+
+**GPU selection in configs:**
+- The `training.devices` field in config specifies number of GPUs
+- Use `CUDA_VISIBLE_DEVICES` env var to control which physical GPUs are used
+
+**Common GPU issues:**
+- **CUDA out of memory**: Reduce batch size or use a different GPU
+- **GPU already in use**: Check `nvidia-smi` and use a free GPU
+- **Multiple users**: Coordinate GPU usage to avoid conflicts
+
 ### Adding New Experiments
 
 1. Create new config: `configs/new_experiment.yaml`

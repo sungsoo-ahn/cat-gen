@@ -139,34 +139,34 @@ class FlowModule(nn.Module):
         atom_feats = torch.bmm(atom_to_token, token_feats)
         return atom_feats
 
-    def forward(self, prim_slab_r_noisy, ads_r_noisy, l_noisy, sm_noisy, sf_noisy, times, feats, multiplicity=1, prim_slab_element_noisy: Optional[torch.Tensor] = None):
+    def forward(self, prim_slab_r_noisy, ads_r_noisy, prim_virtual_noisy, supercell_virtual_noisy, sf_noisy, times, feats, multiplicity=1, prim_slab_element_noisy: Optional[torch.Tensor] = None):
         """
         Forward pass through the flow model.
-        
+
         Args:
             prim_slab_r_noisy: (B*mult, N, 3) noisy prim_slab coordinates
             ads_r_noisy: (B*mult, M, 3) noisy adsorbate coordinates
-            l_noisy: (B*mult, 6) noisy lattice parameters
-            sm_noisy: (B*mult, 3, 3) noisy supercell matrix (normalized)
+            prim_virtual_noisy: (B*mult, 3, 3) noisy primitive virtual coordinates (lattice vectors)
+            supercell_virtual_noisy: (B*mult, 3, 3) noisy supercell virtual coordinates
             sf_noisy: (B*mult,) noisy scaling factor (normalized)
             times: (B*mult,) timesteps
             feats: feature dictionary
             multiplicity: number of samples per input
-        
+
         Returns:
             dict with:
                 - prim_slab_r_update: (B*mult, N, 3)
                 - ads_r_update: (B*mult, M, 3)
-                - l_update: (B*mult, 6)
-                - sm_update: (B*mult, 3, 3)
+                - prim_virtual_update: (B*mult, 3, 3)
+                - supercell_virtual_update: (B*mult, 3, 3)
                 - sf_update: (B*mult,)
         """
-        # Encoder (atom-level attention, joint processing)
+        # Encoder (atom-level attention, joint processing including virtual atoms)
         h_atoms, n_prim_slab, n_ads = self.atom_encoder(
             prim_slab_x_t=prim_slab_r_noisy,
             ads_x_t=ads_r_noisy,
-            l_t=l_noisy,
-            sm_t=sm_noisy,
+            prim_virtual_t=prim_virtual_noisy,
+            supercell_virtual_t=supercell_virtual_noisy,
             sf_t=sf_noisy,
             t=times,
             feats=feats,
@@ -175,19 +175,25 @@ class FlowModule(nn.Module):
         )
 
         # Aggregate to token-level
-        # Create joint atom_to_token matrix
+        # Create joint atom_to_token matrix (including virtual atoms)
         prim_slab_atom_to_token = feats["prim_slab_atom_to_token"]  # (B, N, N)
         ads_atom_to_token = feats["ads_atom_to_token"]  # (B, M, M)
-        
+
         # Block diagonal concatenation for joint atom_to_token
         B = prim_slab_atom_to_token.shape[0]
         N = prim_slab_atom_to_token.shape[1]
         M = ads_atom_to_token.shape[1]
-        
-        # Create block diagonal matrix
-        joint_atom_to_token = torch.zeros(B, N + M, N + M, device=h_atoms.device, dtype=h_atoms.dtype)
+        NUM_VIRTUAL = 6  # 3 primitive + 3 supercell virtual atoms
+
+        # Create block diagonal matrix (now includes virtual atoms)
+        # Total atoms: N + M + 6
+        total_atoms = N + M + NUM_VIRTUAL
+        joint_atom_to_token = torch.zeros(B, total_atoms, total_atoms, device=h_atoms.device, dtype=h_atoms.dtype)
         joint_atom_to_token[:, :N, :N] = prim_slab_atom_to_token
-        joint_atom_to_token[:, N:, N:] = ads_atom_to_token
+        joint_atom_to_token[:, N:N+M, N:N+M] = ads_atom_to_token
+        # Virtual atoms: each virtual atom is its own token (identity mapping)
+        for i in range(NUM_VIRTUAL):
+            joint_atom_to_token[:, N+M+i, N+M+i] = 1.0
 
         h_atoms_to_tokens = self.atom_to_token_trans(h_atoms)
         h_tokens = self._aggregate_atoms_to_tokens(
@@ -308,9 +314,9 @@ class AtomFlowMatching(Module):
         self,
         noised_prim_slab_coords,
         noised_ads_coords,
-        noised_lattice,
-        noised_supercell_matrix,  # normalized space
-        noised_scaling_factor,  # normalized space
+        noised_prim_virtual_coords,
+        noised_supercell_virtual_coords,
+        noised_scaling_factor,
         time,
         network_condition_kwargs: dict,
         training: bool = True,
@@ -322,19 +328,15 @@ class AtomFlowMatching(Module):
         Args:
             noised_prim_slab_coords: (B, N, 3) noised prim_slab coordinates (raw space, Angstrom)
             noised_ads_coords: (B, M, 3) noised adsorbate coordinates (raw space, Angstrom)
-            noised_lattice: (B, 6) noised lattice parameters (a, b, c in Angstrom, alpha, beta, gamma in degrees)
-            noised_supercell_matrix: (B, 3, 3) noised supercell matrix (raw space)
+            noised_prim_virtual_coords: (B, 3, 3) noised primitive virtual coordinates (raw space)
+            noised_supercell_virtual_coords: (B, 3, 3) noised supercell virtual coordinates (raw space)
             noised_scaling_factor: (B,) noised scaling factor (raw space)
             time: timestep(s)
             network_condition_kwargs: additional kwargs for network
             training: whether in training mode
 
         Returns:
-            denoised_prim_slab_coords: (B, N, 3) denoised prim_slab coordinates (raw space, Angstrom)
-            denoised_ads_coords: (B, M, 3) denoised adsorbate coordinates (raw space, Angstrom)
-            denoised_lattice: (B, 6) denoised lattice parameters (Angstrom, degrees)
-            denoised_supercell_matrix: (B, 3, 3) denoised supercell matrix (raw space)
-            denoised_scaling_factor: (B,) denoised scaling factor (raw space)
+            Dictionary with denoised predictions for all variables
         """
         batch, device = noised_prim_slab_coords.shape[0], noised_prim_slab_coords.device
 
@@ -345,13 +347,9 @@ class AtomFlowMatching(Module):
         prim_slab_r_noisy = self.prior_sampler.normalize_prim_slab_coords(noised_prim_slab_coords)
         ads_r_noisy = self.prior_sampler.normalize_ads_coords(noised_ads_coords)
 
-        # Lattice: lengths (Angstrom -> nm), angles (degrees -> normalized)
-        l_noisy = noised_lattice.clone()
-        l_noisy[:, :3] = self.ANG_TO_NM_SCALE * noised_lattice[:, :3]
-        l_noisy[:, 3:] = self.prior_sampler.normalize_angles(noised_lattice[:, 3:])
-
-        # Normalize supercell matrix
-        sm_noisy = self.prior_sampler.normalize_supercell(noised_supercell_matrix)
+        # Normalize virtual coordinates
+        prim_virtual_noisy = self.prior_sampler.normalize_prim_virtual(noised_prim_virtual_coords)
+        supercell_virtual_noisy = self.prior_sampler.normalize_supercell_virtual(noised_supercell_virtual_coords)
 
         # Normalize scaling factor
         sf_noisy = self.prior_sampler.normalize_scaling_factor(noised_scaling_factor)
@@ -360,8 +358,8 @@ class AtomFlowMatching(Module):
         net_out = self.flow_model(
             prim_slab_r_noisy=prim_slab_r_noisy,
             ads_r_noisy=ads_r_noisy,
-            l_noisy=l_noisy,
-            sm_noisy=sm_noisy,
+            prim_virtual_noisy=prim_virtual_noisy,
+            supercell_virtual_noisy=supercell_virtual_noisy,
             sf_noisy=sf_noisy,
             times=time,
             prim_slab_element_noisy=noised_prim_slab_element,
@@ -372,18 +370,9 @@ class AtomFlowMatching(Module):
         denoised_prim_slab_coords = self.prior_sampler.denormalize_prim_slab_coords(net_out["prim_slab_r_update"])
         denoised_ads_coords = self.prior_sampler.denormalize_ads_coords(net_out["ads_r_update"])
 
-        # Denormalize ads center and relative separately
-        denoised_ads_center = self.prior_sampler.denormalize_ads_coords(net_out["ads_center_update"].unsqueeze(1)).squeeze(1)  # (B, 3)
-        # Relative positions: denormalize using same transform (they're in normalized coord space)
-        denoised_ads_rel = self.prior_sampler.denormalize_ads_coords(net_out["ads_rel_update"]) - self.prior_sampler.ads_coord_mean.to(net_out["ads_rel_update"].device)  # Remove mean shift for relative
-
-        # Lattice: lengths (nm -> Angstrom), angles (normalized -> degrees)
-        denoised_lattice = net_out["l_update"].clone()
-        denoised_lattice[:, :3] = self.NM_TO_ANG_SCALE * denoised_lattice[:, :3]
-        denoised_lattice[:, 3:] = self.prior_sampler.denormalize_angles(net_out["l_update"][:, 3:])
-
-        # Denormalize supercell matrix back to raw space
-        denoised_supercell_matrix = self.prior_sampler.denormalize_supercell(net_out["sm_update"])
+        # Denormalize virtual coordinates back to raw space
+        denoised_prim_virtual_coords = self.prior_sampler.denormalize_prim_virtual(net_out["prim_virtual_update"])
+        denoised_supercell_virtual_coords = self.prior_sampler.denormalize_supercell_virtual(net_out["supercell_virtual_update"])
 
         # Denormalize scaling factor back to raw space
         denoised_scaling_factor = self.prior_sampler.denormalize_scaling_factor(net_out["sf_update"])
@@ -392,10 +381,8 @@ class AtomFlowMatching(Module):
         result = {
             "denoised_prim_slab_coords": denoised_prim_slab_coords,
             "denoised_ads_coords": denoised_ads_coords,
-            "denoised_ads_center": denoised_ads_center,
-            "denoised_ads_rel": denoised_ads_rel,
-            "denoised_lattice": denoised_lattice,
-            "denoised_supercell_matrix": denoised_supercell_matrix,
+            "denoised_prim_virtual_coords": denoised_prim_virtual_coords,
+            "denoised_supercell_virtual_coords": denoised_supercell_virtual_coords,
             "denoised_scaling_factor": denoised_scaling_factor,
         }
 
@@ -412,8 +399,8 @@ class AtomFlowMatching(Module):
             feats: Dictionary containing:
                 - prim_slab_cart_coords: (B, N, 3) target prim_slab coordinates
                 - ads_cart_coords: (B, M, 3) target adsorbate coordinates
-                - lattice: (B, 6) target lattice parameters (a, b, c, alpha, beta, gamma)
-                - supercell_matrix: (B, 3, 3) target supercell matrix
+                - primitive_virtual_coords: (B, 3, 3) target primitive virtual coordinates
+                - supercell_virtual_coords: (B, 3, 3) target supercell virtual coordinates
                 - scaling_factor: (B,) target scaling factor
                 - prim_slab_atom_pad_mask: (B, N) mask for valid prim_slab atoms
                 - ads_atom_pad_mask: (B, M) mask for valid adsorbate atoms
@@ -436,7 +423,7 @@ class AtomFlowMatching(Module):
         else:
             times = self._sample_timesteps(batch_size * multiplicity)
 
-        # Sample prior (prim_slab_coords_0, ads_coords_0, lattice_0, supercell_matrix_0, scaling_factor_0) from prior_sampler
+        # Sample prior from prior_sampler (now includes virtual coords)
         sampler_data = {
             "prim_slab_cart_coords": feats["prim_slab_cart_coords"].repeat_interleave(multiplicity, 0),
             "prim_slab_atom_mask": prim_slab_mask.repeat_interleave(multiplicity, 0),
@@ -444,7 +431,6 @@ class AtomFlowMatching(Module):
             "ads_atom_mask": ads_mask.repeat_interleave(multiplicity, 0),
         }
         # Seed random generator for deterministic prior sampling in overfitting tests
-        # Save and restore random state to avoid affecting timestep sampling
         if self.fixed_prior_seed is not None:
             rng_state = torch.get_rng_state()
             cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
@@ -454,54 +440,45 @@ class AtomFlowMatching(Module):
             torch.set_rng_state(rng_state)
             if cuda_rng_state is not None:
                 torch.cuda.set_rng_state(cuda_rng_state)
+
         prim_slab_coords_0 = priors["prim_slab_coords_0"]  # (B * multiplicity, N, 3) raw space
         ads_coords_0 = priors["ads_coords_0"]  # (B * multiplicity, M, 3) raw space
-        lattice_0 = priors["lattice_0"]  # (B * multiplicity, 6) raw space
-        supercell_matrix_0 = priors["supercell_matrix_0"]  # (B * multiplicity, 3, 3) raw space
+        prim_virtual_coords_0 = priors["prim_virtual_coords_0"]  # (B * multiplicity, 3, 3) raw space
+        supercell_virtual_coords_0 = priors["supercell_virtual_coords_0"]  # (B * multiplicity, 3, 3) raw space
         scaling_factor_0 = priors["scaling_factor_0"]  # (B * multiplicity,) raw space
 
         # Prepare target data
         prim_slab_coords = feats["prim_slab_cart_coords"].repeat_interleave(multiplicity, 0)
         ads_coords = feats["ads_cart_coords"].repeat_interleave(multiplicity, 0)
-        lattice = feats["lattice"].repeat_interleave(multiplicity, 0)  # (B, 6)
-        supercell_matrix = feats["supercell_matrix"].repeat_interleave(multiplicity, 0)  # (B, 3, 3)
+        prim_virtual_coords = feats["primitive_virtual_coords"].repeat_interleave(multiplicity, 0)  # (B, 3, 3)
+        supercell_virtual_coords = feats["supercell_virtual_coords"].repeat_interleave(multiplicity, 0)  # (B, 3, 3)
         scaling_factor = feats["scaling_factor"].repeat_interleave(multiplicity, 0)  # (B,)
 
         # Add noise - interpolate between prior and target (in raw space for all variables)
-        # All priors are now in raw space, so interpolation is straightforward
         noised_prim_slab_coords = (1 - times[:, None, None]) * prim_slab_coords_0 + times[:, None, None] * prim_slab_coords
         noised_ads_coords = (1 - times[:, None, None]) * ads_coords_0 + times[:, None, None] * ads_coords
-        noised_lattice = (1 - times[:, None]) * lattice_0 + times[:, None] * lattice  # (B, 6)
-        noised_supercell_matrix = (1 - times[:, None, None]) * supercell_matrix_0 + times[:, None, None] * supercell_matrix  # (B, 3, 3) raw space
-        noised_scaling_factor = (1 - times) * scaling_factor_0 + times * scaling_factor  # (B,) raw values
+        noised_prim_virtual_coords = (1 - times[:, None, None]) * prim_virtual_coords_0 + times[:, None, None] * prim_virtual_coords
+        noised_supercell_virtual_coords = (1 - times[:, None, None]) * supercell_virtual_coords_0 + times[:, None, None] * supercell_virtual_coords
+        noised_scaling_factor = (1 - times) * scaling_factor_0 + times * scaling_factor
 
         # Add element noise when dng=True (Discrete Flow Matching with Masking)
         noised_prim_slab_element = None
         aligned_true_prim_slab_element = None
         if self.dng:
-            # === Discrete Flow Matching (OMatG-style Masking) ===
-            # Target species: integer tensor (1-indexed: 1~100 = element atomic numbers)
-            ref_prim_slab_element = feats["ref_prim_slab_element"]  # (B, N) integer tensor
-            element_1 = ref_prim_slab_element.repeat_interleave(multiplicity, 0)  # (B*mult, N) integer tensor
-            
-            # Prior: all atoms are MASK (index 0)
-            element_0 = torch.zeros_like(element_1)  # (B*mult, N) all zeros = MASK
-            
-            # Stochastic interpolation (Bernoulli sampling)
-            # With probability t, reveal target; otherwise keep MASK
-            unmask_prob = torch.rand_like(element_1.float())  # (B*mult, N)
-            mask = unmask_prob < times[:, None]  # (B*mult, N) boolean
-            noised_prim_slab_element = torch.where(mask, element_1, element_0)  # (B*mult, N) integer tensor
-            
-            # Ground truth for loss (integer tensor, 1-indexed)
-            aligned_true_prim_slab_element = element_1  # (B*mult, N) integer tensor
+            ref_prim_slab_element = feats["ref_prim_slab_element"]
+            element_1 = ref_prim_slab_element.repeat_interleave(multiplicity, 0)
+            element_0 = torch.zeros_like(element_1)
+            unmask_prob = torch.rand_like(element_1.float())
+            mask = unmask_prob < times[:, None]
+            noised_prim_slab_element = torch.where(mask, element_1, element_0)
+            aligned_true_prim_slab_element = element_1
 
-        # Get model prediction (returns dict)
+        # Get model prediction
         net_result = self.preconditioned_network_forward(
             noised_prim_slab_coords,
             noised_ads_coords,
-            noised_lattice,
-            noised_supercell_matrix,
+            noised_prim_virtual_coords,
+            noised_supercell_virtual_coords,
             noised_scaling_factor,
             times,
             training=True,
@@ -511,39 +488,29 @@ class AtomFlowMatching(Module):
             noised_prim_slab_element=noised_prim_slab_element,
         )
 
-        # Compute true center and relative for loss computation
-        ads_mask_expanded = ads_mask.repeat_interleave(multiplicity, 0)
-        ads_mask_sum = ads_mask_expanded.sum(dim=1, keepdim=True)  # (B*mult, 1)
-        true_ads_center = (ads_coords * ads_mask_expanded[..., None]).sum(dim=1) / (ads_mask_sum + EPS_NUMERICAL)  # (B*mult, 3)
-        true_ads_rel = ads_coords - true_ads_center.unsqueeze(1)  # (B*mult, M, 3)
-
         out_dict = dict(
-            denoised_prim_slab_coords=net_result["denoised_prim_slab_coords"],  # raw space (Angstrom)
-            denoised_ads_coords=net_result["denoised_ads_coords"],  # raw space (Angstrom)
-            denoised_ads_center=net_result["denoised_ads_center"],  # raw space (Angstrom)
-            denoised_ads_rel=net_result["denoised_ads_rel"],  # raw space (Angstrom)
-            denoised_lattice=net_result["denoised_lattice"],  # raw space (Angstrom, degrees)
-            denoised_supercell_matrix=net_result["denoised_supercell_matrix"],  # raw space
-            denoised_scaling_factor=net_result["denoised_scaling_factor"],  # raw space
+            denoised_prim_slab_coords=net_result["denoised_prim_slab_coords"],
+            denoised_ads_coords=net_result["denoised_ads_coords"],
+            denoised_prim_virtual_coords=net_result["denoised_prim_virtual_coords"],
+            denoised_supercell_virtual_coords=net_result["denoised_supercell_virtual_coords"],
+            denoised_scaling_factor=net_result["denoised_scaling_factor"],
             times=times,
-            aligned_true_prim_slab_coords=prim_slab_coords,  # raw space (Angstrom)
-            aligned_true_ads_coords=ads_coords,  # raw space (Angstrom)
-            aligned_true_ads_center=true_ads_center,  # raw space (Angstrom)
-            aligned_true_ads_rel=true_ads_rel,  # raw space (Angstrom)
-            aligned_true_lattice=lattice,  # raw space (Angstrom, degrees)
-            aligned_true_supercell_matrix=supercell_matrix,  # raw space
-            aligned_true_scaling_factor=scaling_factor,  # raw space
+            aligned_true_prim_slab_coords=prim_slab_coords,
+            aligned_true_ads_coords=ads_coords,
+            aligned_true_prim_virtual_coords=prim_virtual_coords,
+            aligned_true_supercell_virtual_coords=supercell_virtual_coords,
+            aligned_true_scaling_factor=scaling_factor,
         )
 
         # Add element-related information when dng=True
         if self.dng:
-            out_dict["denoised_prim_slab_element"] = net_result.get("denoised_prim_slab_element")  # logits (B*mult, N, NUM_ELEMENTS)
-            out_dict["aligned_true_prim_slab_element"] = aligned_true_prim_slab_element  # integer tensor (B*mult, N), 1-indexed
+            out_dict["denoised_prim_slab_element"] = net_result.get("denoised_prim_slab_element")
+            out_dict["aligned_true_prim_slab_element"] = aligned_true_prim_slab_element
 
         return out_dict
 
     def compute_loss(self, feats, out_dict, multiplicity=1, loss_type: str = "l2") -> tuple[dict, dict]:
-        """Compute losses for prim_slab coords, adsorbate coords, lattice, supercell matrix, and scaling factor.
+        """Compute losses for prim_slab coords, adsorbate coords, virtual coords, and scaling factor.
 
         Args:
             feats: Input features dictionary
@@ -555,10 +522,8 @@ class AtomFlowMatching(Module):
             Dictionary with per-sample losses:
                 - prim_slab_coord_loss: (B * multiplicity,) prim_slab coordinate loss
                 - ads_coord_loss: (B * multiplicity,) adsorbate coordinate loss
-                - length_loss: (B * multiplicity,) lattice lengths loss (a, b, c)
-                - angle_loss: (B * multiplicity,) lattice angles loss (alpha, beta, gamma)
-                - supercell_matrix_loss: (B * multiplicity,) supercell matrix loss
-                - supercell_matrix_cosine_reg: (B * multiplicity,) cosine regularization for integer supercell matrix
+                - prim_virtual_loss: (B * multiplicity,) primitive virtual coord loss
+                - supercell_virtual_loss: (B * multiplicity,) supercell virtual coord loss
                 - scaling_factor_loss: (B * multiplicity,) scaling factor loss
         """
         if loss_type == "l2":
@@ -571,8 +536,8 @@ class AtomFlowMatching(Module):
             )
 
         # Loss for prim_slab Cartesian coordinates (raw space)
-        true_prim_slab_coords = out_dict["aligned_true_prim_slab_coords"]  # raw space
-        pred_prim_slab_coords = out_dict["denoised_prim_slab_coords"]  # raw space
+        true_prim_slab_coords = out_dict["aligned_true_prim_slab_coords"]
+        pred_prim_slab_coords = out_dict["denoised_prim_slab_coords"]
         prim_slab_mask = feats["prim_slab_atom_pad_mask"].repeat_interleave(multiplicity, 0)
 
         prim_slab_coord_loss = loss_fn(pred_prim_slab_coords, true_prim_slab_coords, reduction="none")
@@ -580,56 +545,38 @@ class AtomFlowMatching(Module):
             prim_slab_mask.sum(dim=1) + 1e-8
         )
 
-        # Loss for adsorbate coordinates using explicit center + relative from model
-        # Model now predicts center and relative separately via dedicated heads
-        true_ads_center = out_dict["aligned_true_ads_center"]  # (B*mult, 3)
-        pred_ads_center = out_dict["denoised_ads_center"]  # (B*mult, 3)
-        true_ads_rel = out_dict["aligned_true_ads_rel"]  # (B*mult, M, 3)
-        pred_ads_rel = out_dict["denoised_ads_rel"]  # (B*mult, M, 3)
+        # Loss for adsorbate coordinates (direct per-atom, no center+relative decomposition)
+        true_ads_coords = out_dict["aligned_true_ads_coords"]
+        pred_ads_coords = out_dict["denoised_ads_coords"]
         ads_mask = feats["ads_atom_pad_mask"].repeat_interleave(multiplicity, 0)
-        ads_mask_sum = ads_mask.sum(dim=1, keepdim=True)  # (B*mult, 1)
+        ads_mask_sum = ads_mask.sum(dim=1, keepdim=True)
 
-        # Center loss (raw space, no normalization to match original implementation)
-        ads_center_loss = loss_fn(pred_ads_center, true_ads_center, reduction="none").mean(dim=1)
-
-        # Relative position loss (these are typically small, bounded values)
-        ads_rel_loss = loss_fn(pred_ads_rel, true_ads_rel, reduction="none")
-        ads_rel_loss = (ads_rel_loss * ads_mask[..., None]).sum(dim=(1, 2)) / (ads_mask_sum.squeeze(-1) + EPS_NUMERICAL)
+        ads_coord_loss = loss_fn(pred_ads_coords, true_ads_coords, reduction="none")
+        ads_coord_loss = (ads_coord_loss * ads_mask[..., None]).sum(dim=(1, 2)) / (ads_mask_sum.squeeze(-1) + EPS_NUMERICAL)
 
         # Handle case where all adsorbate atoms are masked (no adsorbate)
         ads_mask_sum_flat = ads_mask_sum.squeeze(-1)
-        ads_center_loss = torch.where(ads_mask_sum_flat > 0, ads_center_loss, torch.zeros_like(ads_center_loss))
-        ads_rel_loss = torch.where(ads_mask_sum_flat > 0, ads_rel_loss, torch.zeros_like(ads_rel_loss))
+        ads_coord_loss = torch.where(ads_mask_sum_flat > 0, ads_coord_loss, torch.zeros_like(ads_coord_loss))
 
-        # Combined adsorbate loss (for backward compatibility)
-        ads_coord_loss = ads_center_loss + ads_rel_loss
+        # Loss for primitive virtual coordinates (raw space)
+        true_prim_virtual = out_dict["aligned_true_prim_virtual_coords"]
+        pred_prim_virtual = out_dict["denoised_prim_virtual_coords"]
 
-        # Loss for lattice (6-dimensional: a, b, c, alpha, beta, gamma) in raw space
-        true_lattice = out_dict["aligned_true_lattice"]  # (B, 6) raw space (Angstrom, degrees)
-        pred_lattice = out_dict["denoised_lattice"]  # (B, 6) raw space (Angstrom, degrees)
-
-        # Separate loss for lengths (a, b, c) and angles (alpha, beta, gamma)
-        length_loss = loss_fn(
-            pred_lattice[:, :3], true_lattice[:, :3], reduction="none"
-        ).mean(dim=1)
-
-        # Angle loss (angles are in raw degrees space, loss computed directly)
-        # Note: angles are now properly normalized in network input space, so no ANGLE_LOSS_SCALE needed
-        angle_loss = loss_fn(
-            pred_lattice[:, 3:], true_lattice[:, 3:], reduction="none"
-        ).mean(dim=1)
-
-        # Loss for supercell matrix (raw space)
-        true_supercell_matrix = out_dict["aligned_true_supercell_matrix"]  # (B, 3, 3) raw space
-        pred_supercell_matrix = out_dict["denoised_supercell_matrix"]  # (B, 3, 3) raw space
-
-        supercell_loss = loss_fn(
-            pred_supercell_matrix, true_supercell_matrix, reduction="none"
+        prim_virtual_loss = loss_fn(
+            pred_prim_virtual, true_prim_virtual, reduction="none"
         ).mean(dim=(1, 2))
-        
-        # Loss for scaling factor (raw space, no normalization)
-        true_scaling_factor = out_dict["aligned_true_scaling_factor"]  # (B,) raw
-        pred_scaling_factor = out_dict["denoised_scaling_factor"]  # (B,) raw
+
+        # Loss for supercell virtual coordinates (raw space)
+        true_supercell_virtual = out_dict["aligned_true_supercell_virtual_coords"]
+        pred_supercell_virtual = out_dict["denoised_supercell_virtual_coords"]
+
+        supercell_virtual_loss = loss_fn(
+            pred_supercell_virtual, true_supercell_virtual, reduction="none"
+        ).mean(dim=(1, 2))
+
+        # Loss for scaling factor (raw space)
+        true_scaling_factor = out_dict["aligned_true_scaling_factor"]
+        pred_scaling_factor = out_dict["denoised_scaling_factor"]
 
         scaling_factor_loss = loss_fn(
             pred_scaling_factor, true_scaling_factor, reduction="none"
@@ -640,65 +587,42 @@ class AtomFlowMatching(Module):
             time_weights = self._compute_time_weights(out_dict["times"])
             prim_slab_coord_loss = prim_slab_coord_loss * time_weights
             ads_coord_loss = ads_coord_loss * time_weights
-            ads_center_loss = ads_center_loss * time_weights
-            ads_rel_loss = ads_rel_loss * time_weights
-            length_loss = length_loss * time_weights
-            angle_loss = angle_loss * time_weights
-            supercell_loss = supercell_loss * time_weights
+            prim_virtual_loss = prim_virtual_loss * time_weights
+            supercell_virtual_loss = supercell_virtual_loss * time_weights
             scaling_factor_loss = scaling_factor_loss * time_weights
 
         loss_dict = {
-            # Per-sample losses of shape (batch_size * multiplicity,)
             "prim_slab_coord_loss": prim_slab_coord_loss,
             "ads_coord_loss": ads_coord_loss,
-            "ads_center_loss": ads_center_loss,  # New: adsorbate center loss (normalized)
-            "ads_rel_loss": ads_rel_loss,  # New: adsorbate relative position loss
-            "length_loss": length_loss,
-            "angle_loss": angle_loss,
-            "supercell_matrix_loss": supercell_loss,
+            "prim_virtual_loss": prim_virtual_loss,
+            "supercell_virtual_loss": supercell_virtual_loss,
             "scaling_factor_loss": scaling_factor_loss,
         }
-        
+
         check_dict = {}
-        with torch.no_grad():
-            current_det = torch.det(torch.round(out_dict["denoised_supercell_matrix"]).float())
-            check_dict["supercell_matrix_det_min"] = current_det.min()
-            
-            invalid_ratio = (current_det < 0.0).float().mean()
-            check_dict["supercell_det_invalid_ratio"] = invalid_ratio
-            
-            cosine_reg = (1 - torch.cos(2 * torch.pi * out_dict["denoised_supercell_matrix"])).mean(dim=(1, 2))
-            check_dict["supercell_matrix_cosine_reg"] = cosine_reg
-        
-        # Add prim_slab_element_loss when dng=True (Cross-Entropy for Discrete Flow Matching)
+
+        # Add prim_slab_element_loss when dng=True
         if self.dng:
-            pred_element_logits = out_dict["denoised_prim_slab_element"]  # (B*mult, N, NUM_ELEMENTS) - logits
-            true_element = out_dict["aligned_true_prim_slab_element"]  # (B*mult, N) - integer tensor (1-indexed)
-            
-            # Cross-Entropy Loss (OMatG-style)
-            # Convert 1-indexed target to 0-indexed for cross_entropy
-            # Padding positions have true_element=0, which becomes -1 after conversion
-            # Use ignore_index=-1 to ignore these padding positions in loss calculation
-            target_indices = (true_element - 1).long()  # (B*mult, N) 0-indexed; padding becomes -1
-            
-            # Reshape for cross_entropy: (B*mult*N, NUM_ELEMENTS) vs (B*mult*N,)
+            pred_element_logits = out_dict["denoised_prim_slab_element"]
+            true_element = out_dict["aligned_true_prim_slab_element"]
+
+            target_indices = (true_element - 1).long()
             B_mult, N_atoms = pred_element_logits.shape[:2]
-            
+
             element_loss_flat = F.cross_entropy(
-                pred_element_logits.reshape(-1, NUM_ELEMENTS),  # (B*mult*N, NUM_ELEMENTS)
-                target_indices.reshape(-1),  # (B*mult*N,)
+                pred_element_logits.reshape(-1, NUM_ELEMENTS),
+                target_indices.reshape(-1),
                 reduction='none',
-                ignore_index=-1  # Ignore padding positions (where target=-1)
-            )  # (B*mult*N,)
-            
-            # Reshape back and apply mask
-            element_loss = element_loss_flat.reshape(B_mult, N_atoms)  # (B*mult, N)
+                ignore_index=-1
+            )
+
+            element_loss = element_loss_flat.reshape(B_mult, N_atoms)
             element_loss = (element_loss * prim_slab_mask).sum(dim=1) / (
                 prim_slab_mask.sum(dim=1) + 1e-8
-            )  # (B*mult,) shape to match other losses
-            
+            )
+
             loss_dict["prim_slab_element_loss"] = element_loss
-        
+
         return loss_dict, check_dict
 
     @torch.no_grad()
@@ -798,8 +722,8 @@ class AtomFlowMatching(Module):
                 priors = {
                     "prim_slab_coords_0": expanded_priors["prim_slab_coords_0"][:batch_size],
                     "ads_coords_0": expanded_priors["ads_coords_0"][:batch_size],
-                    "lattice_0": expanded_priors["lattice_0"][:batch_size],
-                    "supercell_matrix_0": expanded_priors["supercell_matrix_0"][:batch_size],
+                    "prim_virtual_coords_0": expanded_priors["prim_virtual_coords_0"][:batch_size],
+                    "supercell_virtual_coords_0": expanded_priors["supercell_virtual_coords_0"][:batch_size],
                     "scaling_factor_0": expanded_priors["scaling_factor_0"][:batch_size],
                 }
             else:
@@ -813,26 +737,25 @@ class AtomFlowMatching(Module):
                 torch.cuda.set_rng_state(cuda_rng_state)
         prim_slab_coords_t = priors["prim_slab_coords_0"] * prim_slab_atom_mask.unsqueeze(-1)
         ads_coords_t = priors["ads_coords_0"] * ads_atom_mask.unsqueeze(-1)
-        lattice_t = priors["lattice_0"]
-        supercell_matrix_t = priors["supercell_matrix_0"]
+        prim_virtual_coords_t = priors["prim_virtual_coords_0"]
+        supercell_virtual_coords_t = priors["supercell_virtual_coords_0"]
         scaling_factor_t = priors["scaling_factor_0"]
-        
+
         # Initialize element when dng=True (Discrete Flow Matching with Masking)
         if self.dng:
-            # Prior: all atoms are MASK (index 0)
             prim_slab_element_t = torch.zeros(
                 (batch_size, num_prim_slab_atoms),
                 dtype=torch.long,
                 device=self.device
-            )  # (B*mult, N) integer tensor, all MASK
+            )
         else:
             prim_slab_element_t = None
 
         # Initialize lists to store trajectories if requested
         prim_slab_coord_trajectory = [prim_slab_coords_t] if return_trajectory else None
         ads_coord_trajectory = [ads_coords_t] if return_trajectory else None
-        lattice_trajectory = [lattice_t] if return_trajectory else None
-        supercell_matrix_trajectory = [supercell_matrix_t] if return_trajectory else None
+        prim_virtual_coord_trajectory = [prim_virtual_coords_t] if return_trajectory else None
+        supercell_virtual_coord_trajectory = [supercell_virtual_coords_t] if return_trajectory else None
         scaling_factor_trajectory = [scaling_factor_t] if return_trajectory else None
 
         ### ODE Solver Loop (Euler's Method)
@@ -844,8 +767,8 @@ class AtomFlowMatching(Module):
             net_result = self.preconditioned_network_forward(
                 noised_prim_slab_coords=prim_slab_coords_t,
                 noised_ads_coords=ads_coords_t,
-                noised_lattice=lattice_t,
-                noised_supercell_matrix=supercell_matrix_t,
+                noised_prim_virtual_coords=prim_virtual_coords_t,
+                noised_supercell_virtual_coords=supercell_virtual_coords_t,
                 noised_scaling_factor=scaling_factor_t,
                 time=t.item(),
                 training=False,
@@ -854,8 +777,8 @@ class AtomFlowMatching(Module):
             )
             pred_prim_slab_coords_1 = net_result["denoised_prim_slab_coords"]
             pred_ads_coords_1 = net_result["denoised_ads_coords"]
-            pred_lattice_1 = net_result["denoised_lattice"]
-            pred_supercell_matrix_1 = net_result["denoised_supercell_matrix"]
+            pred_prim_virtual_1 = net_result["denoised_prim_virtual_coords"]
+            pred_supercell_virtual_1 = net_result["denoised_supercell_virtual_coords"]
             pred_scaling_factor_1 = net_result["denoised_scaling_factor"]
             if self.dng:
                 pred_element_1 = net_result.get("denoised_prim_slab_element")
@@ -863,16 +786,16 @@ class AtomFlowMatching(Module):
             # Calculate the flow (vector field) using helper for numerical stability
             flow_prim_slab_coords = compute_flow_vector(pred_prim_slab_coords_1, prim_slab_coords_t, t.item())
             flow_ads_coords = compute_flow_vector(pred_ads_coords_1, ads_coords_t, t.item())
-            flow_lattice = compute_flow_vector(pred_lattice_1, lattice_t, t.item())
-            flow_supercell_matrix = compute_flow_vector(pred_supercell_matrix_1, supercell_matrix_t, t.item())
+            flow_prim_virtual = compute_flow_vector(pred_prim_virtual_1, prim_virtual_coords_t, t.item())
+            flow_supercell_virtual = compute_flow_vector(pred_supercell_virtual_1, supercell_virtual_coords_t, t.item())
             flow_scaling_factor = compute_flow_vector(pred_scaling_factor_1, scaling_factor_t, t.item())
 
             # Perform one step of Euler's method
             dt = t_next - t
             prim_slab_coords_t = prim_slab_coords_t + flow_prim_slab_coords * dt
             ads_coords_t = ads_coords_t + flow_ads_coords * dt
-            lattice_t = lattice_t + flow_lattice * dt
-            supercell_matrix_t = supercell_matrix_t + flow_supercell_matrix * dt
+            prim_virtual_coords_t = prim_virtual_coords_t + flow_prim_virtual * dt
+            supercell_virtual_coords_t = supercell_virtual_coords_t + flow_supercell_virtual * dt
             scaling_factor_t = scaling_factor_t + flow_scaling_factor * dt
             
             # Update element when dng=True (Rate-based unmask, OMatG-style)
@@ -912,17 +835,17 @@ class AtomFlowMatching(Module):
             if return_trajectory:
                 prim_slab_coord_trajectory.append(prim_slab_coords_t)
                 ads_coord_trajectory.append(ads_coords_t)
-                lattice_trajectory.append(lattice_t)
-                supercell_matrix_trajectory.append(supercell_matrix_t)
+                prim_virtual_coord_trajectory.append(prim_virtual_coords_t)
+                supercell_virtual_coord_trajectory.append(supercell_virtual_coords_t)
                 scaling_factor_trajectory.append(scaling_factor_t)
 
         ### Final Refinement Step
         if refine_final:
-            final_prim_slab_coords, final_ads_coords, final_lattice, final_supercell_matrix, final_scaling_factor = self._refine_step(
+            final_prim_slab_coords, final_ads_coords, final_prim_virtual_coords, final_supercell_virtual_coords, final_scaling_factor = self._refine_step(
                 prim_slab_coords_t=prim_slab_coords_t,
                 ads_coords_t=ads_coords_t,
-                lattice_t=lattice_t,
-                supercell_matrix_t=supercell_matrix_t,
+                prim_virtual_coords_t=prim_virtual_coords_t,
+                supercell_virtual_coords_t=supercell_virtual_coords_t,
                 scaling_factor_t=scaling_factor_t,
                 prim_slab_atom_mask=prim_slab_atom_mask,
                 ads_atom_mask=ads_atom_mask,
@@ -932,8 +855,8 @@ class AtomFlowMatching(Module):
         else:
             final_prim_slab_coords = prim_slab_coords_t
             final_ads_coords = ads_coords_t
-            final_lattice = lattice_t
-            final_supercell_matrix = supercell_matrix_t
+            final_prim_virtual_coords = prim_virtual_coords_t
+            final_supercell_virtual_coords = supercell_virtual_coords_t
             final_scaling_factor = scaling_factor_t
 
         # # Center prim + ads together at the end, then split and mask
@@ -959,8 +882,8 @@ class AtomFlowMatching(Module):
         output = {
             "sampled_prim_slab_coords": final_prim_slab_coords,  # (batch_size * multiplicity, N, 3) raw space
             "sampled_ads_coords": final_ads_coords,  # (batch_size * multiplicity, M, 3) raw space
-            "sampled_lattice": final_lattice,  # (batch_size * multiplicity, 6) raw space (Angstrom, degrees)
-            "sampled_supercell_matrix": final_supercell_matrix,  # (batch_size * multiplicity, 3, 3) raw space
+            "sampled_prim_virtual_coords": final_prim_virtual_coords,  # (batch_size * multiplicity, 3, 3) raw space
+            "sampled_supercell_virtual_coords": final_supercell_virtual_coords,  # (batch_size * multiplicity, 3, 3) raw space
             "sampled_scaling_factor": final_scaling_factor,  # (batch_size * multiplicity,) raw value
         }
         
@@ -984,14 +907,14 @@ class AtomFlowMatching(Module):
             if refine_final:
                 prim_slab_coord_trajectory.append(final_prim_slab_coords)
                 ads_coord_trajectory.append(final_ads_coords)
-                lattice_trajectory.append(final_lattice)
-                supercell_matrix_trajectory.append(final_supercell_matrix)
+                prim_virtual_coord_trajectory.append(final_prim_virtual_coords)
+                supercell_virtual_coord_trajectory.append(final_supercell_virtual_coords)
                 scaling_factor_trajectory.append(final_scaling_factor)
 
             output["prim_slab_coord_trajectory"] = torch.stack(prim_slab_coord_trajectory, dim=0)
             output["ads_coord_trajectory"] = torch.stack(ads_coord_trajectory, dim=0)
-            output["lattice_trajectory"] = torch.stack(lattice_trajectory, dim=0)
-            output["supercell_matrix_trajectory"] = torch.stack(supercell_matrix_trajectory, dim=0)
+            output["prim_virtual_coord_trajectory"] = torch.stack(prim_virtual_coord_trajectory, dim=0)
+            output["supercell_virtual_coord_trajectory"] = torch.stack(supercell_virtual_coord_trajectory, dim=0)
             output["scaling_factor_trajectory"] = torch.stack(scaling_factor_trajectory, dim=0)
 
         return output
@@ -1001,8 +924,8 @@ class AtomFlowMatching(Module):
         self,
         prim_slab_coords_t,
         ads_coords_t,
-        lattice_t,
-        supercell_matrix_t,
+        prim_virtual_coords_t,
+        supercell_virtual_coords_t,
         scaling_factor_t,
         prim_slab_atom_mask,
         ads_atom_mask,
@@ -1015,8 +938,8 @@ class AtomFlowMatching(Module):
         net_result = self.preconditioned_network_forward(
             noised_prim_slab_coords=prim_slab_coords_t,
             noised_ads_coords=ads_coords_t,
-            noised_lattice=lattice_t,
-            noised_supercell_matrix=supercell_matrix_t,
+            noised_prim_virtual_coords=prim_virtual_coords_t,
+            noised_supercell_virtual_coords=supercell_virtual_coords_t,
             noised_scaling_factor=scaling_factor_t,
             time=1.0,
             training=False,
@@ -1025,12 +948,12 @@ class AtomFlowMatching(Module):
 
         final_prim_slab_coords = net_result["denoised_prim_slab_coords"]
         final_ads_coords = net_result["denoised_ads_coords"]
-        final_lattice = net_result["denoised_lattice"]
-        final_supercell_matrix = net_result["denoised_supercell_matrix"]
+        final_prim_virtual_coords = net_result["denoised_prim_virtual_coords"]
+        final_supercell_virtual_coords = net_result["denoised_supercell_virtual_coords"]
         final_scaling_factor = net_result["denoised_scaling_factor"]
 
         # Ensure padding atoms remain at zero
         final_prim_slab_coords = final_prim_slab_coords * prim_slab_atom_mask.unsqueeze(-1)
         final_ads_coords = final_ads_coords * ads_atom_mask.unsqueeze(-1)
 
-        return final_prim_slab_coords, final_ads_coords, final_lattice, final_supercell_matrix, final_scaling_factor
+        return final_prim_slab_coords, final_ads_coords, final_prim_virtual_coords, final_supercell_virtual_coords, final_scaling_factor

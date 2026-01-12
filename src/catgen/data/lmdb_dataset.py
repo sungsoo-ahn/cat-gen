@@ -28,6 +28,7 @@ from tqdm import tqdm
 from pymatgen.core import Lattice
 
 from src.catgen.data.pad import pad_to_max
+from src.catgen.data.conversions import compute_virtual_coords
 from src.catgen.constants import MISSING_REF_ENERGY, PAD_VALUE
 
 
@@ -281,6 +282,11 @@ def collate_fn_with_dynamic_padding(
     lattice_params = torch.stack(lattice_params_list)  # [B, 6]
     supercell_matrix = torch.stack(supercell_matrices)
 
+    # Compute virtual atom coordinates from lattice params and supercell matrix
+    primitive_virtual_coords, supercell_virtual_coords = compute_virtual_coords(
+        lattice_params, supercell_matrix
+    )  # Both [B, 3, 3]
+
     n_prim_slab_atoms_max = prim_slab_atomic_numbers.shape[1]
 
     return {
@@ -299,6 +305,9 @@ def collate_fn_with_dynamic_padding(
         ),  # [B]
         # Other fields (already fixed size)
         "supercell_matrix": supercell_matrix,  # [B, 3, 3] or [B, 9]
+        # Virtual atom coordinates (computed from lattice params and supercell matrix)
+        "primitive_virtual_coords": primitive_virtual_coords,  # [B, 3, 3]
+        "supercell_virtual_coords": supercell_virtual_coords,  # [B, 3, 3]
         "n_slab": torch.tensor(n_slabs, dtype=torch.long),  # [B]
         "n_vac": torch.tensor(n_vacs, dtype=torch.long),  # [B]
         # Batch info
@@ -469,6 +478,12 @@ def collate_pyg_with_dynamic_padding(
 
     n_prim_slab_atoms_max = prim_slab_atomic_numbers.shape[1]
     lattice_params = torch.stack([d.lattice_params for d in data_list])  # [B, 6]
+    supercell_matrix = torch.stack([d.supercell_matrix for d in data_list])  # [B, 3, 3]
+
+    # Compute virtual atom coordinates from lattice params and supercell matrix
+    primitive_virtual_coords, supercell_virtual_coords = compute_virtual_coords(
+        lattice_params, supercell_matrix
+    )  # Both [B, 3, 3]
 
     # Create batched Data object
     batched_data = Data(
@@ -491,9 +506,10 @@ def collate_pyg_with_dynamic_padding(
             [d.num_adsorbate_atoms for d in data_list], dtype=torch.long
         ),  # [B]
         # Stacked fixed size data
-        supercell_matrix=torch.stack(
-            [d.supercell_matrix for d in data_list]
-        ),  # [B, ...]
+        supercell_matrix=supercell_matrix,  # [B, 3, 3]
+        # Virtual atom coordinates (computed from lattice params and supercell matrix)
+        primitive_virtual_coords=primitive_virtual_coords,  # [B, 3, 3]
+        supercell_virtual_coords=supercell_virtual_coords,  # [B, 3, 3]
         n_slab=torch.tensor([d.n_slab for d in data_list], dtype=torch.long),  # [B]
         n_vac=torch.tensor([d.n_vac for d in data_list], dtype=torch.long),  # [B]
         # Batch info

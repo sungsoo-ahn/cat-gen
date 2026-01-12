@@ -78,6 +78,11 @@ model:
     # Scaling factor standardization parameters (computed from training data)
     scaling_factor_mean: 3.422560
     scaling_factor_std: 0.473372
+    # Virtual coord normalizers
+    prim_virtual_mean: [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    prim_virtual_std: [[5.0, 5.0, 5.0], [5.0, 5.0, 5.0], [5.0, 5.0, 5.0]]
+    supercell_virtual_mean: [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    supercell_virtual_std: [[10.0, 10.0, 10.0], [10.0, 10.0, 10.0], [10.0, 10.0, 10.0]]
 
   # Flow process arguments
   flow_process_args:
@@ -109,10 +114,8 @@ training:
   loss_type: "l2"  # "l1" or "l2"
   prim_slab_coord_loss_weight: 1.0
   ads_coord_loss_weight: 1.0
-  length_loss_weight: 1.0
-  angle_loss_weight: 1.0
-  supercell_matrix_loss_weight: 1.0
-  supercell_matrix_cosine_reg_weight: 0.0
+  prim_virtual_loss_weight: 1.0
+  supercell_virtual_loss_weight: 1.0
   scaling_factor_loss_weight: 1.0
   prim_slab_element_loss_weight: 5.0  # Used when dng=True
 

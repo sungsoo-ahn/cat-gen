@@ -18,6 +18,8 @@ import yaml
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+from src.catgen.data.conversions import virtual_coords_to_lattice_and_supercell
+
 
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file."""
@@ -134,8 +136,11 @@ def print_results(samples: dict, batch: dict, generation_time: float):
     print(f"\nGenerated coordinates statistics:")
     prim_coords = samples["sampled_prim_slab_coords"]
     ads_coords = samples["sampled_ads_coords"]
-    lattice = samples["sampled_lattice"]
-    supercell = samples["sampled_supercell_matrix"]
+
+    # Convert virtual coords to lattice params and supercell matrix
+    prim_virtual = samples["sampled_prim_virtual_coords"]
+    supercell_virtual = samples["sampled_supercell_virtual_coords"]
+    lattice, supercell = virtual_coords_to_lattice_and_supercell(prim_virtual, supercell_virtual)
 
     print(f"  Primitive slab coords shape: {prim_coords.shape}")
     print(f"    Mean: {prim_coords.mean().item():.4f}, Std: {prim_coords.std().item():.4f}")
