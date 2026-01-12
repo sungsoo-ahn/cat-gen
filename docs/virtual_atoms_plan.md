@@ -380,8 +380,8 @@ Total: N + M + 6 atoms
 ```python
 # Per-atom predictions
 - feats_to_prim_slab_coords: [B, N, 3]  # From x_prim_slab features
-- feats_to_ads_center: [B, 3]           # From global pooled x_ads
-- feats_to_ads_rel_coords: [B, M, 3]    # From x_ads features
+- feats_to_ads_center: [B, 3]           # From global pooled x_ads - REMOVE
+- feats_to_ads_rel_coords: [B, M, 3]    # From x_ads features - REPLACE
 
 # Global predictions (from pooled prim_slab features)
 - feats_to_lattice: [B, 6]              # REMOVE
@@ -391,10 +391,9 @@ Total: N + M + 6 atoms
 
 **Proposed output heads**:
 ```python
-# Per-atom predictions
+# Per-atom predictions (uniform approach for all atom types)
 - feats_to_prim_slab_coords: [B, N, 3]        # From x_prim_slab features
-- feats_to_ads_center: [B, 3]                 # From global pooled x_ads
-- feats_to_ads_rel_coords: [B, M, 3]          # From x_ads features
+- feats_to_ads_coords: [B, M, 3]              # SIMPLIFIED: Direct prediction from x_ads features
 - feats_to_prim_virtual_coords: [B, 3, 3]    # NEW: From x_prim_virtual features
 - feats_to_supercell_virtual_coords: [B, 3, 3] # NEW: From x_supercell_virtual features
 
@@ -404,8 +403,9 @@ Total: N + M + 6 atoms
 
 **Key Changes**:
 1. Remove lattice and supercell_matrix heads (replaced by virtual atoms)
-2. Virtual atoms are predicted per-atom (like prim_slab atoms), not via global pooling
-3. Two separate heads for primitive vs supercell virtual atoms
+2. **SIMPLIFIED**: Remove adsorbate center + relative decomposition, predict directly
+3. All atom coordinates now predicted uniformly (per-atom, from atom features)
+4. Virtual atoms predicted per-atom (like other atoms), not via global pooling
 
 **Output Processing**:
 ```python
@@ -415,10 +415,9 @@ x_ads = x[:, N:N+M, :]                           # [B, M, hidden]
 x_prim_virtual = x[:, N+M:N+M+3, :]              # [B, 3, hidden]
 x_supercell_virtual = x[:, N+M+3:N+M+6, :]       # [B, 3, hidden]
 
-# Coordinate predictions
+# Coordinate predictions (uniform per-atom approach)
 prim_coords = feats_to_prim_slab_coords(x_prim_slab)           # [B, N, 3]
-ads_center = feats_to_ads_center(global_pool(x_ads))           # [B, 3]
-ads_rel = feats_to_ads_rel_coords(x_ads)                       # [B, M, 3]
+ads_coords = feats_to_ads_coords(x_ads)                        # [B, M, 3] - SIMPLIFIED
 prim_virtual_coords = feats_to_prim_virtual_coords(x_prim_virtual)  # [B, 3, 3]
 supercell_virtual_coords = feats_to_supercell_virtual_coords(x_supercell_virtual)  # [B, 3, 3]
 
@@ -450,25 +449,26 @@ Integration: r_t = r_0 + ∫_0^t v dt for each component (including virtual coor
 **Key Changes**:
 1. Remove `l` and `sm` from flow inputs
 2. Add `r_prim_virtual` and `r_supercell_virtual` as flow variables
-3. Virtual coords follow same flow dynamics as real atom coords
-4. Remove velocity predictions `Δl` and `Δsm`
-5. Add velocity predictions `Δr_prim_virtual` and `Δr_supercell_virtual`
+3. **SIMPLIFIED**: Adsorbate coords treated same as primitive slab (direct flow, no center/relative decomposition)
+4. All coordinate types follow identical flow dynamics
+5. Remove velocity predictions `Δl` and `Δsm`
+6. Add velocity predictions `Δr_prim_virtual` and `Δr_supercell_virtual`
 
 #### Detailed Flow Logic
 ```python
-# At time t, compute noisy versions (training)
+# At time t, compute noisy versions (training) - uniform linear interpolation for all coords
 r_prim_t = r_prim_1 * t + r_prim_0 * (1 - t)
-r_ads_t = r_ads_1 * t + r_ads_0 * (1 - t)
+r_ads_t = r_ads_1 * t + r_ads_0 * (1 - t)  # SIMPLIFIED: same as prim
 r_prim_virtual_t = r_prim_virtual_1 * t + r_prim_virtual_0 * (1 - t)
 r_supercell_virtual_t = r_supercell_virtual_1 * t + r_supercell_virtual_0 * (1 - t)
 sf_t = sf_1 * t + sf_0 * (1 - t)
 
-# Model predicts velocities
+# Model predicts velocities (all per-atom, uniform approach)
 v_prim, v_ads, v_prim_virtual, v_supercell_virtual, v_sf = model(
     t, r_prim_t, r_ads_t, r_prim_virtual_t, r_supercell_virtual_t, sf_t
 )
 
-# Compute flow matching loss
+# Compute flow matching loss (uniform MSE across all coordinate types)
 loss = MSE(v_prim, r_prim_1 - r_prim_0) + MSE(v_ads, r_ads_1 - r_ads_0) +
        MSE(v_prim_virtual, r_prim_virtual_1 - r_prim_virtual_0) +
        MSE(v_supercell_virtual, r_supercell_virtual_1 - r_supercell_virtual_0) +
@@ -480,7 +480,7 @@ loss = MSE(v_prim, r_prim_1 - r_prim_0) + MSE(v_ads, r_ads_1 - r_ads_0) +
 # Start from prior
 r_prim_0, r_ads_0, r_prim_virtual_0, r_supercell_virtual_0, sf_0 = sample_prior()
 
-# Integrate forward using ODE solver
+# Integrate forward using ODE solver (uniform approach)
 def ode_func(t, state):
     r_prim, r_ads, r_prim_virtual, r_supercell_virtual, sf = state
     v_prim, v_ads, v_prim_virtual, v_supercell_virtual, v_sf = model(
@@ -781,6 +781,7 @@ Use **6 virtual atoms** with **on-the-fly conversion** from existing data format
 ✅ **No data migration**: Works with existing datasets immediately
 ✅ **Valid priors**: Use existing structured priors (LogNormal, Uniform) then convert
 ✅ **Backward compatible data**: Only model architecture changes, not data format
+✅ **Simplified architecture**: Uniform per-atom coordinate prediction for all atom types (no center/relative decomposition)
 
 ### Design Principles
 1. **Data storage**: Keep lattice params + supercell matrix (unchanged)
@@ -788,6 +789,7 @@ Use **6 virtual atoms** with **on-the-fly conversion** from existing data format
 3. **Model processing**: Work entirely in virtual atom coordinate space
 4. **Assembly**: Convert virtual coords back to lattice params + supercell matrix
 5. **Prior sampling**: Sample lattice params + supercell matrix, then convert
+6. **Uniform coordinate prediction**: All atom coordinates (prim slab, adsorbate, virtual) predicted uniformly via per-atom heads (no special decomposition)
 
 ### Relationship Between Representations
 ```
@@ -901,6 +903,7 @@ Backward (model → assembly):
 5. **Assembly**: ✅ Convert virtual coords back to lattice params + supercell matrix
 6. **Attention mechanism**: ✅ Treat virtual atoms like regular atoms
 7. **Position encoding**: ✅ Yes, apply to all atoms including virtual
+8. **Adsorbate coordinate prediction**: ✅ Direct per-atom prediction (no center/relative decomposition)
 
 ## Remaining Open Questions
 
@@ -989,6 +992,7 @@ Follow the implementation order in Phase 1 → Phase 6 above.
 | Prior sampling | Existing + conversion | Proven distributions, valid lattices |
 | Virtual atom features | One-hot ID (0-5) | Simple, distinguishes prim vs supercell |
 | Assembly | Convert back to lattice + matrix | Reuses existing logic |
+| Coordinate prediction | Uniform per-atom for all types | Simplified, no center/relative decomposition |
 
 ---
 
