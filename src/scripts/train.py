@@ -25,6 +25,7 @@ from lightning.pytorch.loggers import WandbLogger
 from src.utils import init_directory
 from src.catgen.data.datamodule import LMDBDataModule
 from src.catgen.module.effcat_module import EffCatModule
+from src.catgen.callbacks import GradientNormMonitor
 
 
 def set_seed(seed: int, deterministic: bool = True):
@@ -75,6 +76,11 @@ def build_callbacks(config: dict, output_dir: Path) -> list:
             auto_insert_metric_name=False,
         )
     )
+
+    # Gradient norm monitoring for debugging
+    wandb_config = config.get("wandb", {})
+    if wandb_config.get("watch_gradients", False):
+        callbacks.append(GradientNormMonitor(log_every_n_steps=10))
 
     return callbacks
 
@@ -187,6 +193,12 @@ def main(config_path: str, overwrite: bool = False, debug: bool = False):
     # Create model
     print("Creating model...")
     model = create_model(config)
+
+    # Enable WandB gradient watching if configured
+    if wandb_logger is not None and wandb_config.get("watch_gradients", False):
+        watch_freq = wandb_config.get("watch_freq", 100)
+        wandb_logger.watch(model, log="gradients", log_freq=watch_freq)
+        print(f"WandB gradient watching enabled (freq={watch_freq})")
 
     # Create trainer
     training_config = config["training"]

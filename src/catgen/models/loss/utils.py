@@ -26,7 +26,6 @@ def stratify_loss_by_time(
         mask = (batch_t >= low) & (batch_t < high)
         if mask.sum() > 0:
             results[f"{loss_name}_{bin_name}"] = batch_loss[mask].mean().item()
-        else:
-            results[f"{loss_name}_{bin_name}"] = float("nan")
+        # Skip empty bins instead of logging NaN (avoids WandB NaN warnings)
 
     return results

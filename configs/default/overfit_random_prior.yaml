@@ -1,35 +1,36 @@
-# Overfitting test configuration
-# Purpose: Train on a few samples to verify the model can memorize them
-# If the model is working correctly, training loss should approach zero
+# Overfitting test with random prior initialization
+# Purpose: Train on a single sample with random priors each step
+# This is a harder test - model must learn to predict target from ANY random starting point
+# If flow matching works correctly, the model should still converge
 
-output_dir: "data/catgen/overfit_test"
+output_dir: "data/catgen/overfit_random_prior"
 
 experiment:
-  name: "overfit_test"
+  name: "overfit_random_prior"
   version: "1.0.0"
   seed: 42
-  deterministic: true
+  deterministic: false  # Allow randomness in prior sampling
 
-code_version: "overfit"
+code_version: "overfit_random"
 
 # Data configuration - single sample for overfitting
 data:
   train_lmdb_path: "dataset/train/dataset.lmdb"
-  val_lmdb_path: "dataset/train/dataset.lmdb"  # Same as train for overfitting validation
+  val_lmdb_path: "dataset/train/dataset.lmdb"
   test_lmdb_path: null
   batch_size:
-    train: 1  # Single sample for maximum overfitting
+    train: 1
     val: 1
     test: 1
   num_workers:
-    train: 0  # Single worker for deterministic ordering
+    train: 0
     val: 0
     test: 0
   preload_to_ram: true
   use_pyg: false
-  train_shuffle: false  # CRITICAL: Disable shuffle to see same sample each epoch
+  train_shuffle: false  # Always see same sample
 
-# Model architecture (same as default for fair comparison)
+# Model architecture
 model:
   atom_s: 256
   token_s: 256
@@ -44,7 +45,7 @@ model:
     atom_decoder_heads: 4
     attention_impl: "flash"
     activation_checkpointing: false
-    dng: false  # Disable DNG for deterministic overfitting (no random atom count sampling)
+    dng: false
 
   prior_sampler_args:
     coord_std: 1.0
@@ -72,39 +73,34 @@ model:
 
   flow_process_args:
     num_sampling_steps: 50
-    coordinate_augmentation: false  # Disable augmentation for pure overfitting
+    coordinate_augmentation: false
     synchronize_timesteps: false
     compile_model: false
-    timestep_distribution: "uniform"  # Uniform for simpler training signal
-    use_time_reweighting: false  # Disable for simpler loss
-    # Note: fixed_timestep removed - model needs to learn at all t values for sampling to work
-    fixed_prior_seed: 42  # Fix prior noise for deterministic training (critical for overfitting)
+    timestep_distribution: "uniform"
+    use_time_reweighting: false
+    # NO fixed_prior_seed - random prior each training step (harder test)
 
   use_kernels: false
 
-# Training configuration optimized for overfitting
+# Training configuration
 training:
-  max_epochs: 5000  # Full overfitting test
+  max_epochs: 10000  # More epochs since this is harder
   accelerator: "gpu"
   devices: 1
   strategy: "auto"
   precision: "bf16-mixed"
   accumulate_grad_batches: 1
-  num_sanity_val_steps: 0  # Skip sanity check
-  gradient_clip_val: 1.0  # Stricter gradient clipping for stability
+  num_sanity_val_steps: 0
+  gradient_clip_val: 1.0
   gradient_clip_algorithm: "norm"
   val_check_interval: 1.0
-  check_val_every_n_epoch: 5000  # Only validate at end
+  check_val_every_n_epoch: 1000  # Validate periodically to track progress
 
-  # Limit to 1 batch per epoch (1 sample with batch_size=1)
   limit_train_batches: 1
-  limit_val_batches: 1  # Run validation on 1 batch
+  limit_val_batches: 1
 
-  # Loss configuration
-  # HYPOTHESIS: Higher multiplicity provides denser timestep coverage for flow matching
-  # With multiplicity=16, prim_slab coords failed (RMSD 8.5Å) while other outputs succeeded
-  # Increasing to 128 should provide better gradient signal for high-dimensional prim_slab prediction
-  train_multiplicity: 128  # Increased from 16 - critical for learning high-dimensional coordinate flows
+  # Higher multiplicity for better coverage of prior space
+  train_multiplicity: 128
   loss_type: "l2"
   prim_slab_coord_loss_weight: 1.0
   ads_coord_loss_weight: 1.0
@@ -115,37 +111,33 @@ training:
   scaling_factor_loss_weight: 1.0
   prim_slab_element_loss_weight: 5.0
 
-  # Optimizer - high initial LR with cosine decay
-  lr: 0.001  # Moderate LR for testing with bounded outputs
-  weight_decay: 0.0  # No regularization
+  lr: 0.001
+  weight_decay: 0.0
   adam_beta1: 0.9
   adam_beta2: 0.999
 
-  # Disable EMA for pure training signal observation
   use_ema: false
   ema_decay: 0.9999
 
-  # Cosine annealing scheduler for smooth convergence
   scheduler:
-    type: "cosine_warmup"  # Fixed: was "cosine" which caused "Unknown scheduler type" warning
+    type: "cosine_warmup"
     warmup_steps: 100
     warmup_epochs: null
-    min_lr_ratio: 0.01  # Decay to 1% of initial LR
+    min_lr_ratio: 0.01
 
-  # Checkpointing
   checkpoint:
-    save_top_k: 1
+    save_top_k: 3
     save_last: true
-    monitor: "train/total_loss"  # Monitor train loss for overfitting
+    monitor: "train/total_loss"
     mode: "min"
 
-# Validation configuration - run at end to check sample quality
+# Validation configuration
 validation:
-  sample_every_n_epochs: 1  # Sample when validation runs (only at end)
+  sample_every_n_epochs: 1
   flow_samples: 1
   sampling_steps: 50
   sampling_center_coords: false
-  sampling_seed: 42  # Fixed seed for deterministic validation sampling (critical for overfitting)
+  sampling_seed: null  # Random seed for validation sampling too
   timeout: 120
   num_workers: 4
   n_prim_slab_atoms_histogram_path: "primitive_atom_distribution.json"
@@ -168,13 +160,13 @@ prediction:
   sampling_center_coords: false
   refine_final: false
 
-# WandB enabled to track overfitting
+# WandB
 wandb:
   enabled: true
   project: "CatGen"
   entity: null
   mode: "online"
-  tags: ["overfit"]
-  notes: "Overfitting test to verify model training"
+  tags: ["overfit", "random_prior"]
+  notes: "Overfitting test with random prior - harder test of flow matching"
   watch_gradients: true
-  watch_freq: 50
+  watch_freq: 100

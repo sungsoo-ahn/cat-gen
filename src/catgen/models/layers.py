@@ -189,6 +189,8 @@ class AtomAttentionEncoder(Module):
         if prim_slab_element_t is None or not self.dng:
             # Existing approach: (B, N, atom_s) -> (B*mult, N, atom_s)
             c_prim_slab = c_prim_slab.repeat_interleave(multiplicity, 0)
+            # Also expand mask for joint_mask concatenation
+            prim_slab_mask_for_feats = prim_slab_mask_for_feats.repeat_interleave(multiplicity, 0)
 
         # === Adsorbate features ===
         # Features: atom_pad_mask (1) + element one-hot (NUM_ELEMENTS)
@@ -308,6 +310,7 @@ class AtomAttentionDecoder(Module):
         )
 
         # Supercell matrix output is 9-dimensional (flattened 3x3)
+        # Use bounded output to prevent explosion during early training
         self.feats_to_supercell_matrix = nn.Sequential(
             nn.LayerNorm(atom_s), LinearNoBias(atom_s, 9)
         )
@@ -316,6 +319,13 @@ class AtomAttentionDecoder(Module):
         self.feats_to_scaling_factor = nn.Sequential(
             nn.LayerNorm(atom_s), LinearNoBias(atom_s, 1)
         )
+
+        # Output scales for tanh bounding (prevents gradient explosion)
+        # These are applied to normalized outputs before denormalization
+        self.coord_output_scale = 3.0  # coords: tanh * 3 -> [-3, 3] normalized
+        self.lattice_output_scale = 3.0  # lattice: tanh * 3 -> [-3, 3] normalized
+        self.supercell_output_scale = 3.0  # supercell: tanh * 3 -> [-3, 3] normalized
+        self.scaling_factor_output_scale = 3.0  # scaling factor: tanh * 3 -> [-3, 3] normalized
         
         # Add element prediction head when dng=True
         if dng:
@@ -356,16 +366,19 @@ class AtomAttentionDecoder(Module):
         x_prim_slab = x[:, :n_prim_slab, :]  # (B*mult, N, atom_s)
         x_ads = x[:, n_prim_slab:, :]  # (B*mult, M, atom_s)
 
-        # Prim slab position prediction
+        # Prim slab position prediction (bounded to prevent explosion)
         prim_slab_r_update = self.feats_to_prim_slab_coords(x_prim_slab)
+        prim_slab_r_update = torch.tanh(prim_slab_r_update) * self.coord_output_scale
 
         # Adsorbate center prediction (global pooling of adsorbate atoms)
         num_ads_atoms = ads_mask.sum(dim=1, keepdim=True)  # (B*mult, 1)
         x_ads_global = torch.sum(x_ads * ads_mask[..., None], dim=1) / (num_ads_atoms + EPS_NUMERICAL)  # (B*mult, atom_s)
         ads_center_update = self.feats_to_ads_center(x_ads_global)  # (B*mult, 3)
+        ads_center_update = torch.tanh(ads_center_update) * self.coord_output_scale
 
-        # Adsorbate relative position prediction (per-atom)
+        # Adsorbate relative position prediction (per-atom, bounded)
         ads_rel_update = self.feats_to_ads_rel_coords(x_ads)  # (B*mult, M, 3)
+        ads_rel_update = torch.tanh(ads_rel_update) * self.coord_output_scale
 
         # Final adsorbate coords = center + relative
         ads_r_update = ads_center_update.unsqueeze(1) + ads_rel_update  # (B*mult, M, 3)
@@ -374,15 +387,18 @@ class AtomAttentionDecoder(Module):
         num_prim_slab_atoms = prim_slab_mask.sum(dim=1, keepdim=True)  # (B*mult, 1)
         x_global = torch.sum(x_prim_slab * prim_slab_mask[..., None], dim=1) / (num_prim_slab_atoms + EPS_NUMERICAL)
 
-        # Lattice prediction
+        # Lattice prediction (bounded to prevent explosion)
         l_update = self.feats_to_lattice(x_global)  # (B*mult, 6)
+        l_update = torch.tanh(l_update) * self.lattice_output_scale
 
-        # Supercell matrix prediction
+        # Supercell matrix prediction (bounded to prevent explosion)
         sm_flat = self.feats_to_supercell_matrix(x_global)  # (B*mult, 9)
+        sm_flat = torch.tanh(sm_flat) * self.supercell_output_scale
         sm_update = rearrange(sm_flat, "b (i j) -> b i j", i=3, j=3)  # (B*mult, 3, 3)
 
-        # Scaling factor prediction
+        # Scaling factor prediction (bounded to prevent explosion)
         sf_update = self.feats_to_scaling_factor(x_global).squeeze(-1)  # (B*mult,)
+        sf_update = torch.tanh(sf_update) * self.scaling_factor_output_scale
         
         # Add element prediction when dng=True
         if hasattr(self, 'feats_to_prim_slab_element'):

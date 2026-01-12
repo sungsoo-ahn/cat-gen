@@ -49,23 +49,6 @@ def worker_init_fn(id: int):
     random.seed(uint64_seed)
 
 
-class OverfitSampler(Sampler):
-    """Sampler for overfitting on a small subset of data."""
-
-    def __init__(self, num_samples: int, dataset_len: int):
-        self.num_samples = num_samples
-        self.dataset_len = dataset_len
-
-    def __iter__(self):
-        idx_list = list(range(self.dataset_len))
-        num_repeats = math.ceil(self.num_samples / self.dataset_len)
-        full_list = (idx_list * num_repeats)[: self.num_samples]
-        return iter(random.sample(full_list, len(full_list)))
-
-    def __len__(self):
-        return self.num_samples
-
-
 class DynamicBatchSampler(BatchSampler):
     """
     Batch sampler that dynamically groups samples into batches based on a

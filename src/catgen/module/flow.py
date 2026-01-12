@@ -258,6 +258,7 @@ class AtomFlowMatching(Module):
         self.use_time_reweighting = kwargs.get("use_time_reweighting", False)
         self.fixed_timestep = fixed_timestep  # For overfitting tests
         self.fixed_prior_seed = kwargs.get("fixed_prior_seed", None)  # For deterministic prior in overfitting tests
+        self.fixed_prior_multiplicity = kwargs.get("fixed_prior_multiplicity", None)  # Training multiplicity for matching prior sequence
 
     @property
     def device(self):
@@ -443,9 +444,16 @@ class AtomFlowMatching(Module):
             "ads_atom_mask": ads_mask.repeat_interleave(multiplicity, 0),
         }
         # Seed random generator for deterministic prior sampling in overfitting tests
+        # Save and restore random state to avoid affecting timestep sampling
         if self.fixed_prior_seed is not None:
+            rng_state = torch.get_rng_state()
+            cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
             torch.manual_seed(self.fixed_prior_seed)
         priors = self.prior_sampler.sample(sampler_data)
+        if self.fixed_prior_seed is not None:
+            torch.set_rng_state(rng_state)
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state(cuda_rng_state)
         prim_slab_coords_0 = priors["prim_slab_coords_0"]  # (B * multiplicity, N, 3) raw space
         ads_coords_0 = priors["ads_coords_0"]  # (B * multiplicity, M, 3) raw space
         lattice_0 = priors["lattice_0"]  # (B * multiplicity, 6) raw space
@@ -767,7 +775,42 @@ class AtomFlowMatching(Module):
         }
 
         # Initialize from the prior sampler at t=0 (all priors are already in raw space)
-        priors = self.prior_sampler.sample(sampler_data)
+        # Use fixed_prior_seed if set (for overfitting tests - must match training prior)
+        if self.fixed_prior_seed is not None:
+            rng_state = torch.get_rng_state()
+            cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
+            torch.manual_seed(self.fixed_prior_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(self.fixed_prior_seed)
+
+            # When fixed_prior_multiplicity is set, sample with that multiplicity to match
+            # training's random sequence, then extract the samples we need
+            if self.fixed_prior_multiplicity is not None and self.fixed_prior_multiplicity > batch_size:
+                # Expand sampler_data to match training multiplicity
+                expanded_sampler_data = {
+                    "prim_slab_cart_coords": sampler_data["prim_slab_cart_coords"].repeat(self.fixed_prior_multiplicity, 1, 1)[:self.fixed_prior_multiplicity],
+                    "prim_slab_atom_mask": sampler_data["prim_slab_atom_mask"].repeat(self.fixed_prior_multiplicity, 1)[:self.fixed_prior_multiplicity],
+                    "ads_cart_coords": sampler_data["ads_cart_coords"].repeat(self.fixed_prior_multiplicity, 1, 1)[:self.fixed_prior_multiplicity],
+                    "ads_atom_mask": sampler_data["ads_atom_mask"].repeat(self.fixed_prior_multiplicity, 1)[:self.fixed_prior_multiplicity],
+                }
+                expanded_priors = self.prior_sampler.sample(expanded_sampler_data)
+                # Extract only the samples we need
+                priors = {
+                    "prim_slab_coords_0": expanded_priors["prim_slab_coords_0"][:batch_size],
+                    "ads_coords_0": expanded_priors["ads_coords_0"][:batch_size],
+                    "lattice_0": expanded_priors["lattice_0"][:batch_size],
+                    "supercell_matrix_0": expanded_priors["supercell_matrix_0"][:batch_size],
+                    "scaling_factor_0": expanded_priors["scaling_factor_0"][:batch_size],
+                }
+            else:
+                priors = self.prior_sampler.sample(sampler_data)
+        else:
+            priors = self.prior_sampler.sample(sampler_data)
+
+        if self.fixed_prior_seed is not None:
+            torch.set_rng_state(rng_state)
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state(cuda_rng_state)
         prim_slab_coords_t = priors["prim_slab_coords_0"] * prim_slab_atom_mask.unsqueeze(-1)
         ads_coords_t = priors["ads_coords_0"] * ads_atom_mask.unsqueeze(-1)
         lattice_t = priors["lattice_0"]

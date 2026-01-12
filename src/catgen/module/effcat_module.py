@@ -97,6 +97,11 @@ class EffCatModule(LightningModule):
         prior_sampler = CatPriorSampler(**prior_sampler_args)
 
         # Flow matching module
+        # Pass train_multiplicity as fixed_prior_multiplicity for deterministic overfitting tests
+        flow_kwargs = dict(flow_process_args)
+        if training_args.get("train_multiplicity") and flow_process_args.get("fixed_prior_seed"):
+            flow_kwargs["fixed_prior_multiplicity"] = training_args["train_multiplicity"]
+
         self.structure_module = AtomFlowMatching(
             flow_model_args={
                 "atom_s": atom_s,
@@ -105,7 +110,7 @@ class EffCatModule(LightningModule):
             },
             prior_sampler=prior_sampler,
             dng=dng,
-            **flow_process_args,
+            **flow_kwargs,
         )
         
         # Load and cache histogram JSON file when dng=True
@@ -373,6 +378,9 @@ class EffCatModule(LightningModule):
             multiplicity=self.training_args["train_multiplicity"],
         )
 
+        # Store timesteps for monitoring callback
+        self._last_timesteps = out.get("times", None)
+
         # Compute losses
         flow_loss_dict, check_dict = self.structure_module.compute_loss(
             batch,
@@ -439,6 +447,23 @@ class EffCatModule(LightningModule):
         total_loss, flow_loss_dict, out = self._compute_and_log_loss(
             batch, prefix="train"
         )
+
+        # NaN detection for debugging
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            nan_losses = []
+            for loss_name, batch_loss in flow_loss_dict.items():
+                if torch.isnan(batch_loss).any() or torch.isinf(batch_loss).any():
+                    nan_losses.append(loss_name)
+            print(f"[NaN DETECTED] Epoch {self.current_epoch}, batch {batch_idx}")
+            print(f"  NaN/Inf in losses: {nan_losses}")
+            print(f"  total_loss: {total_loss.item()}")
+            for k, v in flow_loss_dict.items():
+                print(f"  {k}: mean={v.mean().item()}, max={v.max().item()}, min={v.min().item()}")
+            # Check model outputs for NaN
+            for k, v in out.items():
+                if isinstance(v, torch.Tensor) and v.is_floating_point():
+                    if torch.isnan(v).any() or torch.isinf(v).any():
+                        print(f"  NaN/Inf in output '{k}': count={torch.isnan(v).sum().item()}")
 
         # Training-specific loggings
         batch_size = batch["ref_prim_slab_element"].shape[0]
