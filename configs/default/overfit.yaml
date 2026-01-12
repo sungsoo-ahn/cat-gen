@@ -1,8 +1,8 @@
 # Overfitting test configuration
-# Purpose: Train on a few samples to verify the model can memorize them
-# If the model is working correctly, training loss should approach zero
+# Same as default structure prediction but with smaller number of samples
+# Purpose: Verify model can memorize a small dataset before scaling up
 
-output_dir: "data/catgen/overfit_test"
+output_dir: "data/catgen/overfit"
 
 experiment:
   name: "overfit_test"
@@ -12,24 +12,24 @@ experiment:
 
 code_version: "overfit"
 
-# Data configuration - single sample for overfitting
+# Data configuration - small batch for overfitting
 data:
   train_lmdb_path: "dataset/train/dataset.lmdb"
-  val_lmdb_path: "dataset/train/dataset.lmdb"  # Same as train for overfitting validation
+  val_lmdb_path: "dataset/train/dataset.lmdb"  # Use train data for validation
   test_lmdb_path: null
   batch_size:
-    train: 1  # Single sample for maximum overfitting
-    val: 1
-    test: 1
+    train: 300  # Small batch size for overfitting
+    val: 300
+    test: 300
   num_workers:
-    train: 0  # Single worker for deterministic ordering
-    val: 0
-    test: 0
+    train: 4
+    val: 4
+    test: 4
   preload_to_ram: true
   use_pyg: false
-  train_shuffle: false  # CRITICAL: Disable shuffle to see same sample each epoch
+  train_shuffle: false  # Always see same samples
 
-# Model architecture (same as default for fair comparison)
+# Model architecture - same as default
 model:
   atom_s: 256
   token_s: 256
@@ -44,7 +44,7 @@ model:
     atom_decoder_heads: 4
     attention_impl: "flash"
     activation_checkpointing: false
-    dng: false  # Disable DNG for deterministic overfitting (no random atom count sampling)
+    dng: false  # Structure prediction mode
 
   prior_sampler_args:
     coord_std: 1.0
@@ -69,7 +69,6 @@ model:
     ads_coord_std: [8.247430, 9.035212, 9.979235]
     scaling_factor_mean: 3.422560
     scaling_factor_std: 0.473372
-    # Virtual coord normalizers (identity for now, will be computed from data)
     prim_virtual_mean: [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
     prim_virtual_std: [[5.0, 5.0, 5.0], [5.0, 5.0, 5.0], [5.0, 5.0, 5.0]]
     supercell_virtual_mean: [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
@@ -77,39 +76,32 @@ model:
 
   flow_process_args:
     num_sampling_steps: 50
-    coordinate_augmentation: false  # Disable augmentation for pure overfitting
+    coordinate_augmentation: true
     synchronize_timesteps: false
     compile_model: false
-    timestep_distribution: "uniform"  # Uniform for simpler training signal
-    use_time_reweighting: false  # Disable for simpler loss
-    # Note: fixed_timestep removed - model needs to learn at all t values for sampling to work
-    fixed_prior_seed: 42  # Fix prior noise for deterministic training (critical for overfitting)
+    timestep_distribution: "exponential"
+    use_time_reweighting: true
 
   use_kernels: false
 
-# Training configuration optimized for overfitting
+# Training configuration - same as default but more epochs
 training:
-  max_epochs: 5000  # Full overfitting test
+  max_epochs: 10000  # More epochs for overfitting
   accelerator: "gpu"
   devices: 1
   strategy: "auto"
   precision: "bf16-mixed"
   accumulate_grad_batches: 1
-  num_sanity_val_steps: 0  # Skip sanity check
-  gradient_clip_val: 1.0  # Stricter gradient clipping for stability
+  num_sanity_val_steps: 0
+  gradient_clip_val: 10.0
   gradient_clip_algorithm: "norm"
   val_check_interval: 1.0
-  check_val_every_n_epoch: 5000  # Only validate at end
+  check_val_every_n_epoch: 1000  # Validate periodically
 
-  # Limit to 1 batch per epoch (1 sample with batch_size=1)
-  limit_train_batches: 1
-  limit_val_batches: 1  # Run validation on 1 batch
+  limit_train_batches: 1  # 1 batch of 300 samples per epoch
+  limit_val_batches: 1
 
-  # Loss configuration
-  # HYPOTHESIS: Higher multiplicity provides denser timestep coverage for flow matching
-  # With multiplicity=16, prim_slab coords failed (RMSD 8.5Å) while other outputs succeeded
-  # Increasing to 128 should provide better gradient signal for high-dimensional prim_slab prediction
-  train_multiplicity: 128  # Increased from 16 - critical for learning high-dimensional coordinate flows
+  train_multiplicity: 1
   loss_type: "l2"
   prim_slab_coord_loss_weight: 1.0
   ads_coord_loss_weight: 1.0
@@ -118,37 +110,32 @@ training:
   scaling_factor_loss_weight: 1.0
   prim_slab_element_loss_weight: 5.0
 
-  # Optimizer - high initial LR with cosine decay
-  lr: 0.001  # Moderate LR for testing with bounded outputs
-  weight_decay: 0.0  # No regularization
+  lr: 0.0001
+  weight_decay: 0.01
   adam_beta1: 0.9
   adam_beta2: 0.999
 
-  # Disable EMA for pure training signal observation
-  use_ema: false
+  use_ema: true
   ema_decay: 0.9999
 
-  # Cosine annealing scheduler for smooth convergence
   scheduler:
-    type: "cosine_warmup"  # Fixed: was "cosine" which caused "Unknown scheduler type" warning
-    warmup_steps: 100
+    type: "cosine_warmup"
+    warmup_steps: 100  # Shorter warmup for overfitting
     warmup_epochs: null
-    min_lr_ratio: 0.01  # Decay to 1% of initial LR
+    min_lr_ratio: 0.01
 
-  # Checkpointing
   checkpoint:
-    save_top_k: 1
+    save_top_k: 3
     save_last: true
-    monitor: "train/total_loss"  # Monitor train loss for overfitting
+    monitor: "train/total_loss"
     mode: "min"
 
-# Validation configuration - run at end to check sample quality
+# Validation configuration
 validation:
-  sample_every_n_epochs: 1  # Sample when validation runs (only at end)
+  sample_every_n_epochs: 1
   flow_samples: 1
   sampling_steps: 50
   sampling_center_coords: false
-  sampling_seed: 42  # Fixed seed for deterministic validation sampling (critical for overfitting)
   timeout: 120
   num_workers: 4
   n_prim_slab_atoms_histogram_path: "primitive_atom_distribution.json"
@@ -161,11 +148,10 @@ validation:
     ltol: 0.3
     stol: 0.5
     angle_tol: 10.0
-  log_structures_to_wandb: false
-  max_structures_to_log: 0
-  # Training match rate: compare generated samples against training set to detect memorization
+  log_structures_to_wandb: true
+  max_structures_to_log: 5
   compute_train_match_rate: true
-  max_train_cache_size: 500  # Maximum training samples to cache for comparison
+  max_train_cache_size: 500
 
 # Prediction configuration
 prediction:
@@ -174,13 +160,13 @@ prediction:
   sampling_center_coords: false
   refine_final: false
 
-# WandB enabled to track overfitting
+# WandB configuration
 wandb:
   enabled: true
   project: "CatGen"
   entity: null
   mode: "online"
   tags: ["overfit"]
-  notes: "Overfitting test to verify model training"
+  notes: "Overfitting test - same config as default but with 300 samples"
   watch_gradients: true
-  watch_freq: 50
+  watch_freq: 100
