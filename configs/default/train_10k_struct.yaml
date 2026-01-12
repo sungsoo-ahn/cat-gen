@@ -82,6 +82,7 @@ training:
   num_sanity_val_steps: 0
   gradient_clip_val: 10.0
   gradient_clip_algorithm: "norm"
+  check_val_every_n_epoch: 1
   val_check_interval: 1.0
 
   train_multiplicity: 1
