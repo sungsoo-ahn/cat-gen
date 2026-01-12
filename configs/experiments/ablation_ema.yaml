@@ -118,7 +118,7 @@ training:
   checkpoint:
     save_top_k: 3
     save_last: true
-    monitor: "val/total_loss"
+    monitor: "val/loss/total"
     mode: "min"
 
 validation:

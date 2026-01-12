@@ -116,7 +116,7 @@ training:
   checkpoint:
     save_top_k: 0  # Don't save checkpoints for feedback loop
     save_last: false
-    monitor: "val/total_loss"
+    monitor: "val/loss/total"
     mode: "min"
 
 validation:

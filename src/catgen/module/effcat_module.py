@@ -397,6 +397,7 @@ class EffCatModule(LightningModule):
             out,
             multiplicity=self.training_args["train_multiplicity"],
             loss_type=self.training_args["loss_type"],
+            loss_space=self.training_args.get("loss_space", "raw"),
         )
 
         # Calculate total weighted loss

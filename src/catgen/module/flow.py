@@ -122,6 +122,9 @@ class FlowModule(nn.Module):
             attention_impl=attention_impl,
             activation_checkpointing=activation_checkpointing,
             dng=dng,
+            coord_output_scale=kwargs.get("coord_output_scale", 3.0),
+            output_init=kwargs.get("output_init", "default"),
+            output_init_scale=kwargs.get("output_init_scale", 0.01),
         )
         self.dng = dng
 
@@ -384,6 +387,12 @@ class AtomFlowMatching(Module):
             "denoised_prim_virtual_coords": denoised_prim_virtual_coords,
             "denoised_supercell_virtual_coords": denoised_supercell_virtual_coords,
             "denoised_scaling_factor": denoised_scaling_factor,
+            # Also store normalized predictions for normalized loss computation
+            "normalized_prim_slab_coords": net_out["prim_slab_r_update"],
+            "normalized_ads_coords": net_out["ads_r_update"],
+            "normalized_prim_virtual_coords": net_out["prim_virtual_update"],
+            "normalized_supercell_virtual_coords": net_out["supercell_virtual_update"],
+            "normalized_scaling_factor": net_out["sf_update"],
         }
 
         # Add element when dng=True (logits format)
@@ -494,6 +503,12 @@ class AtomFlowMatching(Module):
             denoised_prim_virtual_coords=net_result["denoised_prim_virtual_coords"],
             denoised_supercell_virtual_coords=net_result["denoised_supercell_virtual_coords"],
             denoised_scaling_factor=net_result["denoised_scaling_factor"],
+            # Store normalized predictions for normalized loss computation
+            normalized_prim_slab_coords=net_result.get("normalized_prim_slab_coords"),
+            normalized_ads_coords=net_result.get("normalized_ads_coords"),
+            normalized_prim_virtual_coords=net_result.get("normalized_prim_virtual_coords"),
+            normalized_supercell_virtual_coords=net_result.get("normalized_supercell_virtual_coords"),
+            normalized_scaling_factor=net_result.get("normalized_scaling_factor"),
             times=times,
             aligned_true_prim_slab_coords=prim_slab_coords,
             aligned_true_ads_coords=ads_coords,
@@ -509,7 +524,7 @@ class AtomFlowMatching(Module):
 
         return out_dict
 
-    def compute_loss(self, feats, out_dict, multiplicity=1, loss_type: str = "l2") -> tuple[dict, dict]:
+    def compute_loss(self, feats, out_dict, multiplicity=1, loss_type: str = "l2", loss_space: str = "raw") -> tuple[dict, dict]:
         """Compute losses for prim_slab coords, adsorbate coords, virtual coords, and scaling factor.
 
         Args:
@@ -517,6 +532,7 @@ class AtomFlowMatching(Module):
             out_dict: Output dictionary from forward pass
             multiplicity: number of samples per input
             loss_type: "l1" or "l2" loss
+            loss_space: "raw" for loss in Angstrom space, "normalized" for unit-variance space
 
         Returns:
             Dictionary with per-sample losses:
@@ -535,9 +551,33 @@ class AtomFlowMatching(Module):
                 f"Unsupported loss_type: {loss_type}. Must be 'l1' or 'l2'."
             )
 
-        # Loss for prim_slab Cartesian coordinates (raw space)
-        true_prim_slab_coords = out_dict["aligned_true_prim_slab_coords"]
-        pred_prim_slab_coords = out_dict["denoised_prim_slab_coords"]
+        # Get predictions and targets based on loss_space
+        if loss_space == "normalized":
+            # Use normalized predictions (unit variance space)
+            pred_prim_slab_coords = out_dict["normalized_prim_slab_coords"]
+            pred_ads_coords = out_dict["normalized_ads_coords"]
+            pred_prim_virtual = out_dict["normalized_prim_virtual_coords"]
+            pred_supercell_virtual = out_dict["normalized_supercell_virtual_coords"]
+            pred_scaling_factor = out_dict["normalized_scaling_factor"]
+            # Normalize targets
+            true_prim_slab_coords = self.prior_sampler.normalize_prim_slab_coords(out_dict["aligned_true_prim_slab_coords"])
+            true_ads_coords = self.prior_sampler.normalize_ads_coords(out_dict["aligned_true_ads_coords"])
+            true_prim_virtual = self.prior_sampler.normalize_prim_virtual(out_dict["aligned_true_prim_virtual_coords"])
+            true_supercell_virtual = self.prior_sampler.normalize_supercell_virtual(out_dict["aligned_true_supercell_virtual_coords"])
+            true_scaling_factor = self.prior_sampler.normalize_scaling_factor(out_dict["aligned_true_scaling_factor"])
+        else:
+            # Use raw space (Angstrom)
+            pred_prim_slab_coords = out_dict["denoised_prim_slab_coords"]
+            pred_ads_coords = out_dict["denoised_ads_coords"]
+            pred_prim_virtual = out_dict["denoised_prim_virtual_coords"]
+            pred_supercell_virtual = out_dict["denoised_supercell_virtual_coords"]
+            pred_scaling_factor = out_dict["denoised_scaling_factor"]
+            true_prim_slab_coords = out_dict["aligned_true_prim_slab_coords"]
+            true_ads_coords = out_dict["aligned_true_ads_coords"]
+            true_prim_virtual = out_dict["aligned_true_prim_virtual_coords"]
+            true_supercell_virtual = out_dict["aligned_true_supercell_virtual_coords"]
+            true_scaling_factor = out_dict["aligned_true_scaling_factor"]
+
         prim_slab_mask = feats["prim_slab_atom_pad_mask"].repeat_interleave(multiplicity, 0)
 
         prim_slab_coord_loss = loss_fn(pred_prim_slab_coords, true_prim_slab_coords, reduction="none")
@@ -545,9 +585,7 @@ class AtomFlowMatching(Module):
             prim_slab_mask.sum(dim=1) + 1e-8
         )
 
-        # Loss for adsorbate coordinates (direct per-atom, no center+relative decomposition)
-        true_ads_coords = out_dict["aligned_true_ads_coords"]
-        pred_ads_coords = out_dict["denoised_ads_coords"]
+        # Loss for adsorbate coordinates
         ads_mask = feats["ads_atom_pad_mask"].repeat_interleave(multiplicity, 0)
         ads_mask_sum = ads_mask.sum(dim=1, keepdim=True)
 
@@ -558,26 +596,17 @@ class AtomFlowMatching(Module):
         ads_mask_sum_flat = ads_mask_sum.squeeze(-1)
         ads_coord_loss = torch.where(ads_mask_sum_flat > 0, ads_coord_loss, torch.zeros_like(ads_coord_loss))
 
-        # Loss for primitive virtual coordinates (raw space)
-        true_prim_virtual = out_dict["aligned_true_prim_virtual_coords"]
-        pred_prim_virtual = out_dict["denoised_prim_virtual_coords"]
-
+        # Loss for primitive virtual coordinates
         prim_virtual_loss = loss_fn(
             pred_prim_virtual, true_prim_virtual, reduction="none"
         ).mean(dim=(1, 2))
 
-        # Loss for supercell virtual coordinates (raw space)
-        true_supercell_virtual = out_dict["aligned_true_supercell_virtual_coords"]
-        pred_supercell_virtual = out_dict["denoised_supercell_virtual_coords"]
-
+        # Loss for supercell virtual coordinates
         supercell_virtual_loss = loss_fn(
             pred_supercell_virtual, true_supercell_virtual, reduction="none"
         ).mean(dim=(1, 2))
 
-        # Loss for scaling factor (raw space)
-        true_scaling_factor = out_dict["aligned_true_scaling_factor"]
-        pred_scaling_factor = out_dict["denoised_scaling_factor"]
-
+        # Loss for scaling factor
         scaling_factor_loss = loss_fn(
             pred_scaling_factor, true_scaling_factor, reduction="none"
         )
@@ -592,11 +621,11 @@ class AtomFlowMatching(Module):
             scaling_factor_loss = scaling_factor_loss * time_weights
 
         loss_dict = {
-            "coord/primitive_slab": prim_slab_coord_loss,
-            "coord/adsorbate": ads_coord_loss,
-            "virtual/primitive": prim_virtual_loss,
-            "virtual/supercell": supercell_virtual_loss,
-            "lattice/scaling_factor": scaling_factor_loss,
+            "prim_slab_coord_loss": prim_slab_coord_loss,
+            "ads_coord_loss": ads_coord_loss,
+            "prim_virtual_loss": prim_virtual_loss,
+            "supercell_virtual_loss": supercell_virtual_loss,
+            "scaling_factor_loss": scaling_factor_loss,
         }
 
         check_dict = {}
@@ -621,7 +650,7 @@ class AtomFlowMatching(Module):
                 prim_slab_mask.sum(dim=1) + 1e-8
             )
 
-            loss_dict["element/primitive_slab"] = element_loss
+            loss_dict["prim_slab_element_loss"] = element_loss
 
         return loss_dict, check_dict
 

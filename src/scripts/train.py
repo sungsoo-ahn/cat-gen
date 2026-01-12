@@ -108,6 +108,7 @@ def create_model(config: dict) -> EffCatModule:
             "supercell_virtual_loss_weight": training_config["supercell_virtual_loss_weight"],
             "scaling_factor_loss_weight": training_config["scaling_factor_loss_weight"],
             "prim_slab_element_loss_weight": training_config.get("prim_slab_element_loss_weight", 5.0),
+            "loss_space": training_config.get("loss_space", "raw"),
             "lr": training_config["lr"],
             "weight_decay": training_config["weight_decay"],
             "adam_beta1": training_config.get("adam_beta1", 0.9),

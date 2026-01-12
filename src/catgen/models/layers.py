@@ -309,8 +309,12 @@ class AtomAttentionDecoder(Module):
         attention_impl,
         activation_checkpointing=False,
         dng: bool = False,
+        coord_output_scale: float = 3.0,
+        output_init: str = "default",
+        output_init_scale: float = 0.01,
     ):
         super().__init__()
+        self.dng = dng
         self.atom_decoder = DiT(
             dim=atom_s,
             depth=atom_decoder_depth,
@@ -346,9 +350,9 @@ class AtomAttentionDecoder(Module):
 
         # Output scales for tanh bounding (prevents gradient explosion)
         # These are applied to normalized outputs before denormalization
-        self.coord_output_scale = 3.0  # coords: tanh * 3 -> [-3, 3] normalized
-        self.virtual_coord_output_scale = 3.0  # virtual coords: tanh * 3 -> [-3, 3] normalized
-        self.scaling_factor_output_scale = 3.0  # scaling factor: tanh * 3 -> [-3, 3] normalized
+        self.coord_output_scale = coord_output_scale
+        self.virtual_coord_output_scale = coord_output_scale
+        self.scaling_factor_output_scale = coord_output_scale
 
         # Add element prediction head when dng=True
         if dng:
@@ -357,6 +361,34 @@ class AtomAttentionDecoder(Module):
                 nn.LayerNorm(atom_s),
                 LinearNoBias(atom_s, NUM_ELEMENTS)  # output logits
             )
+
+        # Initialize output projection layers
+        self._init_output_layers(output_init, output_init_scale)
+
+    def _init_output_layers(self, init_type: str, scale: float):
+        """Initialize output projection layers for controlled initial predictions.
+
+        Args:
+            init_type: "default" (PyTorch default), "zero" (zero weights), or "small" (small random)
+            scale: Standard deviation for "small" initialization
+        """
+        projections = [
+            self.feats_to_prim_slab_coords,
+            self.feats_to_ads_coords,
+            self.feats_to_prim_virtual_coords,
+            self.feats_to_supercell_virtual_coords,
+            self.feats_to_scaling_factor,
+        ]
+        if self.dng:
+            projections.append(self.feats_to_prim_slab_element)
+
+        for proj in projections:
+            linear = proj[-1]  # Last layer is LinearNoBias
+            if init_type == "zero":
+                nn.init.zeros_(linear.weight)
+            elif init_type == "small":
+                nn.init.normal_(linear.weight, mean=0.0, std=scale)
+            # "default" keeps PyTorch default (Kaiming Uniform)
 
     def forward(self, x, t, feats, n_prim_slab, n_ads=None, multiplicity=1):
         """

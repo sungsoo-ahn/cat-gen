@@ -45,6 +45,10 @@ model:
     attention_impl: "flash"
     activation_checkpointing: false
     dng: false  # Structure prediction mode
+    # Output initialization for lower initial loss
+    coord_output_scale: 1.0  # Reduced from 3.0 to bound initial predictions tighter
+    output_init: "zero"  # Zero-init output layers so predictions start at 0
+    output_init_scale: 0.01  # Only used if output_init: "small"
 
   prior_sampler_args:
     coord_std: 1.0
@@ -103,6 +107,7 @@ training:
 
   train_multiplicity: 1
   loss_type: "l2"
+  loss_space: "normalized"  # Use normalized space for lower initial loss
   prim_slab_coord_loss_weight: 1.0
   ads_coord_loss_weight: 1.0
   prim_virtual_loss_weight: 1.0
@@ -127,7 +132,7 @@ training:
   checkpoint:
     save_top_k: 3
     save_last: true
-    monitor: "train/total_loss"
+    monitor: "train/loss/total"
     mode: "min"
 
 # Validation configuration
