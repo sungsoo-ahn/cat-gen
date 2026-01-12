@@ -33,7 +33,7 @@ class GradientNormMonitor(Callback):
                 total_norm += p.grad.data.norm(2).item() ** 2
         total_norm = total_norm ** 0.5
 
-        pl_module.log("train/grad_norm_total", total_norm)
+        pl_module.log("train/gradients/total", total_norm)
 
         # Log per-module gradient norms for the flow model
         if hasattr(pl_module, "structure_module"):
@@ -44,4 +44,4 @@ class GradientNormMonitor(Callback):
                     if p.grad is not None:
                         module_norm += p.grad.data.norm(2).item() ** 2
                 module_norm = module_norm ** 0.5
-                pl_module.log(f"train/grad_norm_{name}", module_norm)
+                pl_module.log(f"train/gradients/{name}", module_norm)

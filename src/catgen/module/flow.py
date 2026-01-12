@@ -592,11 +592,11 @@ class AtomFlowMatching(Module):
             scaling_factor_loss = scaling_factor_loss * time_weights
 
         loss_dict = {
-            "prim_slab_coord_loss": prim_slab_coord_loss,
-            "ads_coord_loss": ads_coord_loss,
-            "prim_virtual_loss": prim_virtual_loss,
-            "supercell_virtual_loss": supercell_virtual_loss,
-            "scaling_factor_loss": scaling_factor_loss,
+            "coord/primitive_slab": prim_slab_coord_loss,
+            "coord/adsorbate": ads_coord_loss,
+            "virtual/primitive": prim_virtual_loss,
+            "virtual/supercell": supercell_virtual_loss,
+            "lattice/scaling_factor": scaling_factor_loss,
         }
 
         check_dict = {}
@@ -621,7 +621,7 @@ class AtomFlowMatching(Module):
                 prim_slab_mask.sum(dim=1) + 1e-8
             )
 
-            loss_dict["prim_slab_element_loss"] = element_loss
+            loss_dict["element/primitive_slab"] = element_loss
 
         return loss_dict, check_dict
 

@@ -144,31 +144,31 @@ def compare_structures(
     ads_mask = batch["ads_atom_pad_mask"].cpu().numpy()[0]
 
     # Coordinate RMSD
-    metrics["prim_slab_coord_rmsd"] = compute_coordinate_rmsd(
+    metrics["rmsd/coord/primitive_slab"] = compute_coordinate_rmsd(
         gen_prim_coords, true_prim_coords, prim_mask
     )
 
     if ads_mask.sum() > 0:
-        metrics["ads_coord_rmsd"] = compute_coordinate_rmsd(
+        metrics["rmsd/coord/adsorbate"] = compute_coordinate_rmsd(
             gen_ads_coords, true_ads_coords, ads_mask
         )
     else:
-        metrics["ads_coord_rmsd"] = 0.0
+        metrics["rmsd/coord/adsorbate"] = 0.0
 
     # Lattice parameter differences
-    metrics["lattice_length_mae"] = float(
+    metrics["mae/lattice/length"] = float(
         np.abs(gen_lattice[:3] - true_lattice[:3]).mean()
     )
-    metrics["lattice_angle_mae"] = float(
+    metrics["mae/lattice/angle"] = float(
         np.abs(gen_lattice[3:] - true_lattice[3:]).mean()
     )
 
     # Supercell matrix difference
-    metrics["supercell_mae"] = float(np.abs(gen_supercell - true_supercell).mean())
-    metrics["supercell_max_diff"] = float(np.abs(gen_supercell - true_supercell).max())
+    metrics["mae/supercell/mean"] = float(np.abs(gen_supercell - true_supercell).mean())
+    metrics["mae/supercell/max"] = float(np.abs(gen_supercell - true_supercell).max())
 
     # Scaling factor difference
-    metrics["scaling_factor_diff"] = float(np.abs(gen_scaling - true_scaling))
+    metrics["mae/scaling_factor"] = float(np.abs(gen_scaling - true_scaling))
 
     return metrics
 
@@ -230,7 +230,7 @@ def log_to_wandb(
 
         wandb.log(
             {
-                "generated_structure": wandb.Molecule(
+                "structures/generated": wandb.Molecule(
                     gen_path, caption="Generated Structure"
                 ),
             }
@@ -256,7 +256,7 @@ def log_to_wandb(
 
         wandb.log(
             {
-                "ground_truth_structure": wandb.Molecule(
+                "structures/ground_truth": wandb.Molecule(
                     true_path, caption="Ground Truth Structure"
                 ),
             }

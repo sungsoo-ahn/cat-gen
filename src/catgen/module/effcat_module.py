@@ -424,7 +424,7 @@ class EffCatModule(LightningModule):
         # Loss per component
         for loss_name, batch_loss in flow_loss_dict.items():
             self.log(
-                f"{prefix}/{loss_name}",
+                f"{prefix}/loss/{loss_name}",
                 batch_loss.mean(),
                 batch_size=batch_size,
                 sync_dist=sync_dist,
@@ -433,7 +433,7 @@ class EffCatModule(LightningModule):
         # Check metrics for supercell matrix (not trained)
         for metric_name, batch_metric in check_dict.items():
             self.log(
-                f"{prefix}/{metric_name}",
+                f"{prefix}/check/{metric_name}",
                 batch_metric.mean(),
                 batch_size=batch_size,
                 sync_dist=sync_dist,
@@ -441,7 +441,7 @@ class EffCatModule(LightningModule):
 
         # Total loss
         self.log(
-            f"{prefix}/total_loss",
+            f"{prefix}/loss/total",
             total_loss,
             batch_size=batch_size,
             sync_dist=sync_dist,
@@ -475,7 +475,7 @@ class EffCatModule(LightningModule):
 
         # Training-specific loggings
         batch_size = batch["ref_prim_slab_element"].shape[0]
-        self.log("train/batch_size", batch_size)
+        self.log("train/throughput/batch_size", batch_size)
 
         # Stratified loss logging
         for loss_name, batch_loss in flow_loss_dict.items():
@@ -484,11 +484,11 @@ class EffCatModule(LightningModule):
                 batch_t=out["times"], batch_loss=batch_loss, loss_name=loss_name
             )
             for k, v in stratified_losses.items():
-                self.log(f"train/{k}", v, batch_size=batch_size)
+                self.log(f"train/loss_by_time/{k}", v, batch_size=batch_size)
 
         # Time
         step_time = time.time() - step_start_time
-        self.log("train/samples_per_second", batch_size / step_time)
+        self.log("train/throughput/samples_per_second", batch_size / step_time)
 
         # Cache training samples for train match rate comparison (structure prediction only)
         if not self.dng and len(self._train_sample_cache) < self._max_train_cache_size:
@@ -700,7 +700,7 @@ class EffCatModule(LightningModule):
         if molecules_to_log:
             try:
                 self.logger.experiment.log({
-                    "val/generated_structures": molecules_to_log,
+                    "val/structures/generated": molecules_to_log,
                     "epoch": self.current_epoch,
                 })
                 rank_zero_info(f"| Logged {len(molecules_to_log)} generated structures to W&B.")
@@ -903,8 +903,8 @@ class EffCatModule(LightningModule):
         if generated_molecules:
             try:
                 self.logger.experiment.log({
-                    "val/high_rmsd_structures": generated_molecules,
-                    "val/high_rmsd_ground_truth": ground_truth_molecules,
+                    "val/structures/high_rmsd_generated": generated_molecules,
+                    "val/structures/high_rmsd_ground_truth": ground_truth_molecules,
                     "epoch": self.current_epoch,
                 })
                 rank_zero_info(f"| Logged {len(generated_molecules)} high-RMSD structures to W&B.")
@@ -1344,56 +1344,56 @@ class EffCatModule(LightningModule):
             # Primitive slab RMSD (only when dng=False, as RMSD is not computed when dng=True)
             if not self.dng:
                 self.log(
-                    "val/prim_match_rate", self.val_prim_match_rate.compute(), rank_zero_only=True
+                    "val/match_rate/primitive_slab", self.val_prim_match_rate.compute(), rank_zero_only=True
                 )
                 if self.val_prim_rmsd.update_count > 0:
-                    self.log("val/avg_prim_rmsd", self.val_prim_rmsd.compute(), rank_zero_only=True)
+                    self.log("val/rmsd/primitive_slab", self.val_prim_rmsd.compute(), rank_zero_only=True)
                 else:
-                    self.log("val/avg_prim_rmsd", float("nan"), rank_zero_only=True)
-                
+                    self.log("val/rmsd/primitive_slab", float("nan"), rank_zero_only=True)
+
                 # Slab RMSD (whole slab after assemble) - only when dng=False
                 self.log(
-                    "val/slab_match_rate", self.val_slab_match_rate.compute(), rank_zero_only=True
+                    "val/match_rate/slab", self.val_slab_match_rate.compute(), rank_zero_only=True
                 )
                 if self.val_slab_rmsd.update_count > 0:
-                    self.log("val/avg_slab_rmsd", self.val_slab_rmsd.compute(), rank_zero_only=True)
+                    self.log("val/rmsd/slab", self.val_slab_rmsd.compute(), rank_zero_only=True)
                 else:
-                    self.log("val/avg_slab_rmsd", float("nan"), rank_zero_only=True)
+                    self.log("val/rmsd/slab", float("nan"), rank_zero_only=True)
 
                 # Training match rate (compare generated samples against training set)
                 if self.val_train_prim_match_rate.update_count > 0:
                     self.log(
-                        "val/train_prim_match_rate",
+                        "val/match_rate/train_primitive",
                         self.val_train_prim_match_rate.compute(),
                         rank_zero_only=True,
                     )
                 else:
-                    self.log("val/train_prim_match_rate", float("nan"), rank_zero_only=True)
+                    self.log("val/match_rate/train_primitive", float("nan"), rank_zero_only=True)
 
             # Log prim structural validity (always computed, regardless of compute_adsorption)
             self.log(
-                "val/prim_structural_validity_rate",
+                "val/validity/structural_primitive",
                 self.val_prim_structural_validity.compute() if self.val_prim_structural_validity.update_count > 0 else float("nan"),
                 rank_zero_only=True,
             )
-            
+
             # Log slab structural validity (always computed, regardless of compute_adsorption)
             self.log(
-                "val/structural_validity_rate",
+                "val/validity/structural",
                 self.val_structural_validity.compute() if self.val_structural_validity.update_count > 0 else float("nan"),
                 rank_zero_only=True,
             )
 
             # Log SMACT validity
             self.log(
-                "val/smact_validity_rate",
+                "val/validity/smact",
                 self.val_smact_validity.compute() if self.val_smact_validity.update_count > 0 else float("nan"),
                 rank_zero_only=True,
             )
 
             # Log crystal validity
             self.log(
-                "val/crystal_validity_rate",
+                "val/validity/crystal",
                 self.val_crystal_validity.compute() if self.val_crystal_validity.update_count > 0 else float("nan"),
                 rank_zero_only=True,
             )
@@ -1402,12 +1402,12 @@ class EffCatModule(LightningModule):
             if compute_adsorption:
                 if self.val_adsorption_energy.update_count > 0:
                     self.log(
-                        "val/avg_adsorption_energy",
+                        "val/energy/adsorption",
                         self.val_adsorption_energy.compute(),
                         rank_zero_only=True,
                     )
                 else:
-                    self.log("val/avg_adsorption_energy", float("nan"), rank_zero_only=True)
+                    self.log("val/energy/adsorption", float("nan"), rank_zero_only=True)
 
             # Log generated structures to W&B as 3D visualizations
             log_structures = self.validation_args.get("log_structures_to_wandb", False)

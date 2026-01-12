@@ -42,24 +42,24 @@ class TimestepDistributionMonitor(Callback):
         times = pl_module._last_timesteps
 
         # Log statistics
-        pl_module.log("train/timestep_mean", times.mean())
-        pl_module.log("train/timestep_std", times.std())
-        pl_module.log("train/timestep_min", times.min())
-        pl_module.log("train/timestep_max", times.max())
+        pl_module.log("train/timestep/mean", times.mean())
+        pl_module.log("train/timestep/std", times.std())
+        pl_module.log("train/timestep/min", times.min())
+        pl_module.log("train/timestep/max", times.max())
 
         # Log bin counts for verification
         bins = [
-            (0.0, 0.25, "t_0_025"),
-            (0.25, 0.5, "t_025_05"),
-            (0.5, 0.75, "t_05_075"),
-            (0.75, 1.0, "t_075_1"),
+            (0.0, 0.25, "0.00-0.25"),
+            (0.25, 0.5, "0.25-0.50"),
+            (0.5, 0.75, "0.50-0.75"),
+            (0.75, 1.0, "0.75-1.00"),
         ]
         for low, high, name in bins:
             if high < 1.0:
                 count = ((times >= low) & (times < high)).sum().float()
             else:
                 count = ((times >= low) & (times <= high)).sum().float()
-            pl_module.log(f"train/timestep_bin_{name}_count", count)
+            pl_module.log(f"train/timestep/bin/{name}", count)
 
         # Accumulate for histogram
         if self.log_histogram:
@@ -78,7 +78,7 @@ class TimestepDistributionMonitor(Callback):
 
             pl_module.logger.experiment.log(
                 {
-                    "train/timestep_histogram": wandb.Histogram(self._timestep_buffer),
+                    "train/timestep/histogram": wandb.Histogram(self._timestep_buffer),
                     "trainer/global_step": trainer.global_step,
                 }
             )
