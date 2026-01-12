@@ -705,26 +705,42 @@ class EffCatModule(LightningModule):
             return
 
         # Build flat list of (rmsd, batch_output_idx, item_idx, sample_idx)
+        # Include structures even when RMSD is None (no match) - these are often the worst
         rmsd_with_indices = []
         item_counter = 0
 
         for batch_output_idx, batch_output in enumerate(valid_outputs):
             batch_size = batch_output["sampled_prim_slab_coords"].shape[0] // n_samples
 
+            # Get supercell matrices to check for singular matrices
+            supercell_matrices = (
+                rearrange(
+                    batch_output["sampled_supercell_matrices"],
+                    "(b m) i j -> b m i j",
+                    m=n_samples,
+                )
+                .cpu()
+                .numpy()
+            )
+
             for item_idx in range(batch_size):
                 if item_counter < len(prim_rmsd_results_per_item):
                     rmsd_list = prim_rmsd_results_per_item[item_counter]
                     for sample_idx, rmsd in enumerate(rmsd_list):
-                        if rmsd is not None:  # Only include matched structures
-                            rmsd_with_indices.append((rmsd, batch_output_idx, item_idx, sample_idx))
+                        # Skip singular supercell matrices (det ≈ 0) - assembly will fail
+                        det = np.linalg.det(supercell_matrices[item_idx, sample_idx])
+                        if abs(det) < 0.1:
+                            continue
+                        # Include all structures (matched or not)
+                        rmsd_with_indices.append((rmsd, batch_output_idx, item_idx, sample_idx))
                 item_counter += 1
 
         if not rmsd_with_indices:
-            rank_zero_info("| No matched structures found, skipping high-RMSD logging.")
+            rank_zero_info("| No structures to log (all have singular supercell matrices).")
             return
 
-        # Sort by RMSD descending (highest first) and take top-K
-        rmsd_with_indices.sort(key=lambda x: x[0], reverse=True)
+        # Sort by RMSD descending (highest first), None values (no match) treated as worst (infinity)
+        rmsd_with_indices.sort(key=lambda x: (x[0] is None, x[0] if x[0] is not None else 0), reverse=True)
         worst_structures = rmsd_with_indices[:max_structures]
 
         generated_molecules = []
@@ -813,10 +829,11 @@ class EffCatModule(LightningModule):
                 ase_write(gen_temp_path, gen_atoms, format='proteindatabank')
                 temp_files.append(gen_temp_path)
 
+                rmsd_str = f"RMSD={rmsd:.3f}A" if rmsd is not None else "No match"
                 generated_molecules.append(
                     wandb.Molecule(
                         gen_temp_path,
-                        caption=f"High-RMSD #{rank+1}: RMSD={rmsd:.3f}A (epoch {self.current_epoch})"
+                        caption=f"Worst #{rank+1}: {rmsd_str} (epoch {self.current_epoch})"
                     )
                 )
 
