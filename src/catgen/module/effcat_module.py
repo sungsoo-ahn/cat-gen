@@ -682,6 +682,193 @@ class EffCatModule(LightningModule):
             except OSError:
                 pass
 
+    def _log_high_rmsd_structures_to_wandb(
+        self,
+        valid_outputs: list,
+        prim_rmsd_results_per_item: list,
+        n_samples: int,
+        max_structures: int = 3,
+    ) -> None:
+        """
+        Log generated structures with highest RMSD to W&B for debugging.
+
+        Helps identify worst-performing samples to understand model failures.
+
+        Args:
+            valid_outputs: List of validation step outputs containing generated structures
+            prim_rmsd_results_per_item: List of RMSD results per item (each is list of n_samples RMSDs)
+            n_samples: Number of samples per input (flow_samples)
+            max_structures: Maximum number of high-RMSD structures to log
+        """
+        if not self.logger or not hasattr(self.logger, 'experiment'):
+            rank_zero_info("| W&B logger not available, skipping high-RMSD structure logging.")
+            return
+
+        # Build flat list of (rmsd, batch_output_idx, item_idx, sample_idx)
+        rmsd_with_indices = []
+        item_counter = 0
+
+        for batch_output_idx, batch_output in enumerate(valid_outputs):
+            batch_size = batch_output["sampled_prim_slab_coords"].shape[0] // n_samples
+
+            for item_idx in range(batch_size):
+                if item_counter < len(prim_rmsd_results_per_item):
+                    rmsd_list = prim_rmsd_results_per_item[item_counter]
+                    for sample_idx, rmsd in enumerate(rmsd_list):
+                        if rmsd is not None:  # Only include matched structures
+                            rmsd_with_indices.append((rmsd, batch_output_idx, item_idx, sample_idx))
+                item_counter += 1
+
+        if not rmsd_with_indices:
+            rank_zero_info("| No matched structures found, skipping high-RMSD logging.")
+            return
+
+        # Sort by RMSD descending (highest first) and take top-K
+        rmsd_with_indices.sort(key=lambda x: x[0], reverse=True)
+        worst_structures = rmsd_with_indices[:max_structures]
+
+        generated_molecules = []
+        ground_truth_molecules = []
+        temp_files = []
+
+        for rank, (rmsd, batch_output_idx, item_idx, sample_idx) in enumerate(worst_structures):
+            batch_output = valid_outputs[batch_output_idx]
+
+            # Reshape sampled data from (B*M, ...) to (B, M, ...)
+            sampled_prim_slab_coords = (
+                rearrange(
+                    batch_output["sampled_prim_slab_coords"],
+                    "(b m) n c -> b m n c",
+                    m=n_samples,
+                )
+                .cpu()
+                .numpy()
+            )
+            sampled_ads_coords = (
+                rearrange(
+                    batch_output["sampled_ads_coords"],
+                    "(b m) n c -> b m n c",
+                    m=n_samples,
+                )
+                .cpu()
+                .numpy()
+            )
+            sampled_lattices = (
+                rearrange(
+                    batch_output["sampled_lattices"],
+                    "(b m) c -> b m c",
+                    m=n_samples,
+                )
+                .cpu()
+                .numpy()
+            )
+            sampled_supercell_matrices = (
+                rearrange(
+                    batch_output["sampled_supercell_matrices"],
+                    "(b m) ... -> b m ...",
+                    m=n_samples,
+                )
+                .cpu()
+                .numpy()
+            )
+            sampled_scaling_factors = (
+                rearrange(
+                    batch_output["sampled_scaling_factors"],
+                    "(b m) -> b m",
+                    m=n_samples,
+                )
+                .cpu()
+                .numpy()
+            )
+
+            # Ground truth data (no multiplicity dimension)
+            true_prim_slab_coords = batch_output["true_prim_slab_coords"].cpu().numpy()
+            true_ads_coords = batch_output["true_ads_coords"].cpu().numpy()
+            true_lattices = batch_output["true_lattices"].cpu().numpy()
+            true_supercells = batch_output["true_supercells"].cpu().numpy()
+            true_scaling_factors = batch_output["true_scaling_factors"].cpu().numpy()
+
+            prim_slab_atom_types = batch_output["prim_slab_atom_types"].cpu().numpy()
+            ads_atom_types = batch_output["ads_atom_types"].cpu().numpy()
+            prim_slab_atom_mask = batch_output["prim_slab_atom_mask"].cpu().numpy().astype(bool)
+            ads_atom_mask = batch_output["ads_atom_mask"].cpu().numpy().astype(bool)
+
+            try:
+                # Assemble generated structure
+                gen_atoms, _ = assemble(
+                    generated_prim_slab_coords=sampled_prim_slab_coords[item_idx, sample_idx],
+                    generated_ads_coords=sampled_ads_coords[item_idx, sample_idx],
+                    generated_lattice=sampled_lattices[item_idx, sample_idx],
+                    generated_supercell_matrix=sampled_supercell_matrices[item_idx, sample_idx],
+                    generated_scaling_factor=sampled_scaling_factors[item_idx, sample_idx],
+                    prim_slab_atom_types=prim_slab_atom_types[item_idx],
+                    ads_atom_types=ads_atom_types[item_idx],
+                    prim_slab_atom_mask=prim_slab_atom_mask[item_idx],
+                    ads_atom_mask=ads_atom_mask[item_idx],
+                )
+
+                # Write generated structure to temp PDB
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as f:
+                    gen_temp_path = f.name
+                ase_write(gen_temp_path, gen_atoms, format='proteindatabank')
+                temp_files.append(gen_temp_path)
+
+                generated_molecules.append(
+                    wandb.Molecule(
+                        gen_temp_path,
+                        caption=f"High-RMSD #{rank+1}: RMSD={rmsd:.3f}A (epoch {self.current_epoch})"
+                    )
+                )
+
+                # Assemble ground truth structure
+                true_atoms, _ = assemble(
+                    generated_prim_slab_coords=true_prim_slab_coords[item_idx],
+                    generated_ads_coords=true_ads_coords[item_idx],
+                    generated_lattice=true_lattices[item_idx],
+                    generated_supercell_matrix=true_supercells[item_idx],
+                    generated_scaling_factor=true_scaling_factors[item_idx],
+                    prim_slab_atom_types=prim_slab_atom_types[item_idx],
+                    ads_atom_types=ads_atom_types[item_idx],
+                    prim_slab_atom_mask=prim_slab_atom_mask[item_idx],
+                    ads_atom_mask=ads_atom_mask[item_idx],
+                )
+
+                # Write ground truth to temp PDB
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as f:
+                    true_temp_path = f.name
+                ase_write(true_temp_path, true_atoms, format='proteindatabank')
+                temp_files.append(true_temp_path)
+
+                ground_truth_molecules.append(
+                    wandb.Molecule(
+                        true_temp_path,
+                        caption=f"Ground Truth #{rank+1} (epoch {self.current_epoch})"
+                    )
+                )
+
+            except Exception as e:
+                rank_zero_info(f"| WARNING: Failed to log high-RMSD structure #{rank+1}: {e}")
+                continue
+
+        # Log to W&B
+        if generated_molecules:
+            try:
+                self.logger.experiment.log({
+                    "val/high_rmsd_structures": generated_molecules,
+                    "val/high_rmsd_ground_truth": ground_truth_molecules,
+                    "epoch": self.current_epoch,
+                })
+                rank_zero_info(f"| Logged {len(generated_molecules)} high-RMSD structures to W&B.")
+            except Exception as e:
+                rank_zero_info(f"| WARNING: Failed to log high-RMSD structures to W&B: {e}")
+
+        # Clean up temp files
+        for temp_path in temp_files:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
     def on_validation_epoch_end(self) -> None:
         # NOTE: This hook is called on ALL ranks in DDP, but we only execute code on rank 0.
         # PyTorch Lightning will synchronize all ranks after this hook completes.
@@ -887,6 +1074,14 @@ class EffCatModule(LightningModule):
                         self.val_slab_rmsd.update(min(valid_rmsds))
                     else:
                         self.val_slab_match_rate.update(0.0)
+
+                # Log high-RMSD structures for debugging (top 3 worst by prim RMSD)
+                self._log_high_rmsd_structures_to_wandb(
+                    valid_outputs=valid_outputs,
+                    prim_rmsd_results_per_item=prim_rmsd_results_per_item,
+                    n_samples=n_samples,
+                    max_structures=3,
+                )
 
             # Execute prim structural validity tasks in parallel (always computed)
             prim_validity_results_per_item = run_parallel_tasks(
