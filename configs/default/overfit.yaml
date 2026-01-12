@@ -163,6 +163,9 @@ validation:
     angle_tol: 10.0
   log_structures_to_wandb: false
   max_structures_to_log: 0
+  # Training match rate: compare generated samples against training set to detect memorization
+  compute_train_match_rate: true
+  max_train_cache_size: 500  # Maximum training samples to cache for comparison
 
 # Prediction configuration
 prediction:

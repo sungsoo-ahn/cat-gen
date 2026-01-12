@@ -140,6 +140,8 @@ validation:
     angle_tol: 10.0
   log_structures_to_wandb: true
   max_structures_to_log: 5
+  compute_train_match_rate: true
+  max_train_cache_size: 500
 
 prediction:
   num_samples: 1

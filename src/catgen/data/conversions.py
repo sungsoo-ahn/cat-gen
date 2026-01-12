@@ -181,8 +181,9 @@ def virtual_coords_to_lattice_and_supercell(
     # Compute supercell matrix: supercell_matrix = supercell_vectors @ inv(prim_vectors)
     supercell_matrices = torch.zeros(B, 3, 3, device=device, dtype=dtype)
     for i in range(B):
-        prim_np = prim_virtual_coords[i].detach().cpu().numpy()
-        supercell_np = supercell_virtual_coords[i].detach().cpu().numpy()
+        # Convert to float32 for numpy compatibility (bfloat16 not supported)
+        prim_np = prim_virtual_coords[i].detach().cpu().float().numpy()
+        supercell_np = supercell_virtual_coords[i].detach().cpu().float().numpy()
         sm_np = compute_supercell_matrix_from_vectors(prim_np, supercell_np)
         supercell_matrices[i] = torch.from_numpy(sm_np).to(device=device, dtype=dtype)
 
