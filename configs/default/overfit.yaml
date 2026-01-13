@@ -43,7 +43,7 @@ model:
     attention_impl: "flash"
     activation_checkpointing: false
     # Output initialization for lower initial loss
-    coord_output_scale: 1.0  # Reduced from 3.0 to bound initial predictions tighter
+    coord_output_scale: 3.0  # FIXED: Was 1.0, but need 3.0 for virtual coordinates (range needs [-15,15]Å)
     output_init: "zero"  # Zero-init output layers so predictions start at 0
     output_init_scale: 0.01  # Only used if output_init: "small"
 
