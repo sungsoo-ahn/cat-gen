@@ -1,6 +1,9 @@
 # Overfitting test configuration
-# Same as default structure prediction but with smaller number of samples
+# Uses a small toy dataset for fast loading (~300 samples vs 460K)
 # Purpose: Verify model can memorize a small dataset before scaling up
+#
+# To create the toy dataset:
+#   uv run python src/scripts/create_toy_dataset.py
 
 output_dir: "data/catgen/overfit"
 
@@ -12,10 +15,10 @@ experiment:
 
 code_version: "overfit"
 
-# Data configuration - small batch for overfitting
+# Data configuration - uses small toy dataset for fast loading
 data:
-  train_lmdb_path: "dataset/train/dataset.lmdb"
-  val_lmdb_path: "dataset/train/dataset.lmdb"  # Use train data for validation
+  train_lmdb_path: "dataset/toy/dataset.lmdb"
+  val_lmdb_path: "dataset/toy/dataset.lmdb"  # Use train data for validation
   test_lmdb_path: null
   batch_size:
     train: 300  # Small batch size for overfitting
