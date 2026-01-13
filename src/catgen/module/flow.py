@@ -15,9 +15,6 @@ from src.catgen.models.layers import (
 from src.catgen.models.utils import LinearNoBias, center_random_augmentation, default
 from src.catgen.scripts.refine_sc_mat import refine_sc_mat
 from src.catgen.constants import (
-    NUM_ELEMENTS,
-    MASK_TOKEN_INDEX,
-    NUM_ELEMENTS_WITH_MASK,
     FLOW_EPSILON,
     EPS_NUMERICAL,
 )
@@ -83,7 +80,6 @@ class FlowModule(nn.Module):
         atom_decoder_heads,
         attention_impl,
         activation_checkpointing=False,
-        dng: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -96,7 +92,6 @@ class FlowModule(nn.Module):
             positional_encoding=atom_encoder_positional_encoding,
             attention_impl=attention_impl,
             activation_checkpointing=activation_checkpointing,
-            dng=dng,
         )
         self.atom_to_token_trans = nn.Sequential(
             LinearNoBias(atom_s, token_s), nn.ReLU()
@@ -121,12 +116,10 @@ class FlowModule(nn.Module):
             atom_decoder_heads=atom_decoder_heads,
             attention_impl=attention_impl,
             activation_checkpointing=activation_checkpointing,
-            dng=dng,
             coord_output_scale=kwargs.get("coord_output_scale", 3.0),
             output_init=kwargs.get("output_init", "default"),
             output_init_scale=kwargs.get("output_init_scale", 0.01),
         )
-        self.dng = dng
 
     def _aggregate_atoms_to_tokens(self, atom_feats, atom_to_token, multiplicity=1):
         atom_to_token = atom_to_token.float()
@@ -142,7 +135,7 @@ class FlowModule(nn.Module):
         atom_feats = torch.bmm(atom_to_token, token_feats)
         return atom_feats
 
-    def forward(self, prim_slab_r_noisy, ads_r_noisy, prim_virtual_noisy, supercell_virtual_noisy, sf_noisy, times, feats, multiplicity=1, prim_slab_element_noisy: Optional[torch.Tensor] = None):
+    def forward(self, prim_slab_r_noisy, ads_r_noisy, prim_virtual_noisy, supercell_virtual_noisy, sf_noisy, times, feats, multiplicity=1):
         """
         Forward pass through the flow model.
 
@@ -174,7 +167,6 @@ class FlowModule(nn.Module):
             t=times,
             feats=feats,
             multiplicity=multiplicity,
-            prim_slab_element_t=prim_slab_element_noisy,
         )
 
         # Aggregate to token-level
@@ -241,7 +233,6 @@ class AtomFlowMatching(Module):
         coordinate_augmentation: bool = True,
         synchronize_timesteps: bool = False,
         compile_model: bool = False,
-        dng: bool = False,
         timestep_distribution: str = "uniform",
         fixed_timestep: float = None,
         **kwargs: dict,
@@ -262,7 +253,6 @@ class AtomFlowMatching(Module):
         self.num_sampling_steps = num_sampling_steps
         self.coordinate_augmentation = coordinate_augmentation
         self.synchronize_timesteps = synchronize_timesteps
-        self.dng = dng
         self.timestep_distribution = timestep_distribution
         self.use_time_reweighting = kwargs.get("use_time_reweighting", False)
         self.fixed_timestep = fixed_timestep  # For overfitting tests
@@ -323,7 +313,6 @@ class AtomFlowMatching(Module):
         time,
         network_condition_kwargs: dict,
         training: bool = True,
-        noised_prim_slab_element: Optional[torch.Tensor] = None,
     ):
         """
         Forward pass with preconditioning (standardization).
@@ -365,7 +354,6 @@ class AtomFlowMatching(Module):
             supercell_virtual_noisy=supercell_virtual_noisy,
             sf_noisy=sf_noisy,
             times=time,
-            prim_slab_element_noisy=noised_prim_slab_element,
             **network_condition_kwargs,
         )
 
@@ -394,10 +382,6 @@ class AtomFlowMatching(Module):
             "normalized_supercell_virtual_coords": net_out["supercell_virtual_update"],
             "normalized_scaling_factor": net_out["sf_update"],
         }
-
-        # Add element when dng=True (logits format)
-        if self.dng:
-            result["denoised_prim_slab_element"] = net_out.get("prim_slab_element_update")
 
         return result
 
@@ -470,18 +454,6 @@ class AtomFlowMatching(Module):
         noised_supercell_virtual_coords = (1 - times[:, None, None]) * supercell_virtual_coords_0 + times[:, None, None] * supercell_virtual_coords
         noised_scaling_factor = (1 - times) * scaling_factor_0 + times * scaling_factor
 
-        # Add element noise when dng=True (Discrete Flow Matching with Masking)
-        noised_prim_slab_element = None
-        aligned_true_prim_slab_element = None
-        if self.dng:
-            ref_prim_slab_element = feats["ref_prim_slab_element"]
-            element_1 = ref_prim_slab_element.repeat_interleave(multiplicity, 0)
-            element_0 = torch.zeros_like(element_1)
-            unmask_prob = torch.rand_like(element_1.float())
-            mask = unmask_prob < times[:, None]
-            noised_prim_slab_element = torch.where(mask, element_1, element_0)
-            aligned_true_prim_slab_element = element_1
-
         # Get model prediction
         net_result = self.preconditioned_network_forward(
             noised_prim_slab_coords,
@@ -494,7 +466,6 @@ class AtomFlowMatching(Module):
             network_condition_kwargs=dict(
                 feats=feats, multiplicity=multiplicity, **kwargs
             ),
-            noised_prim_slab_element=noised_prim_slab_element,
         )
 
         out_dict = dict(
@@ -516,11 +487,6 @@ class AtomFlowMatching(Module):
             aligned_true_supercell_virtual_coords=supercell_virtual_coords,
             aligned_true_scaling_factor=scaling_factor,
         )
-
-        # Add element-related information when dng=True
-        if self.dng:
-            out_dict["denoised_prim_slab_element"] = net_result.get("denoised_prim_slab_element")
-            out_dict["aligned_true_prim_slab_element"] = aligned_true_prim_slab_element
 
         return out_dict
 
@@ -630,28 +596,6 @@ class AtomFlowMatching(Module):
 
         check_dict = {}
 
-        # Add prim_slab_element_loss when dng=True
-        if self.dng:
-            pred_element_logits = out_dict["denoised_prim_slab_element"]
-            true_element = out_dict["aligned_true_prim_slab_element"]
-
-            target_indices = (true_element - 1).long()
-            B_mult, N_atoms = pred_element_logits.shape[:2]
-
-            element_loss_flat = F.cross_entropy(
-                pred_element_logits.reshape(-1, NUM_ELEMENTS),
-                target_indices.reshape(-1),
-                reduction='none',
-                ignore_index=-1
-            )
-
-            element_loss = element_loss_flat.reshape(B_mult, N_atoms)
-            element_loss = (element_loss * prim_slab_mask).sum(dim=1) / (
-                prim_slab_mask.sum(dim=1) + 1e-8
-            )
-
-            loss_dict["prim_slab_element_loss"] = element_loss
-
         return loss_dict, check_dict
 
     @torch.no_grad()
@@ -696,28 +640,16 @@ class AtomFlowMatching(Module):
         """
         ### Setup and initialize
         num_steps = default(num_sampling_steps, self.num_sampling_steps)
-        # When dng=True and multiplicity > 1, masks and feats are already expanded in effcat_module.py
-        # Check if masks are already expanded by checking if both masks have the same batch size
-        # (which would be batch_size * multiplicity if already expanded)
-        feats_already_expanded = False
-        if self.dng and multiplicity > 1 and prim_slab_atom_mask.shape[0] == ads_atom_mask.shape[0]:
-            # Masks are already expanded in effcat_module.py, don't expand again
-            # Also, feats are already expanded, so we should pass multiplicity=1 to flow_model.forward
-            feats_already_expanded = True
-        else:
-            # Normal case: expand masks by multiplicity
-            prim_slab_atom_mask = prim_slab_atom_mask.repeat_interleave(multiplicity, 0)
-            ads_atom_mask = ads_atom_mask.repeat_interleave(multiplicity, 0)
+        # Expand masks by multiplicity
+        prim_slab_atom_mask = prim_slab_atom_mask.repeat_interleave(multiplicity, 0)
+        ads_atom_mask = ads_atom_mask.repeat_interleave(multiplicity, 0)
         batch_size = prim_slab_atom_mask.shape[0]
-        # Use multiplicity=1 for flow_model if feats are already expanded
-        flow_model_multiplicity = 1 if feats_already_expanded else multiplicity
         num_prim_slab_atoms = prim_slab_atom_mask.shape[1]
         num_ads_atoms = ads_atom_mask.shape[1]
         timesteps = torch.linspace(0.0, 1.0, num_steps + 1, device=self.device)
-        
-        # Update network_condition_kwargs to use flow_model_multiplicity if feats are already expanded
-        # Create a copy to avoid modifying the original
-        network_condition_kwargs = {**network_condition_kwargs, "multiplicity": flow_model_multiplicity}
+
+        # Update network_condition_kwargs with multiplicity
+        network_condition_kwargs = {**network_condition_kwargs, "multiplicity": multiplicity}
 
         # Dummy data dict for correct sampling shape
         sampler_data = {
@@ -770,16 +702,6 @@ class AtomFlowMatching(Module):
         supercell_virtual_coords_t = priors["supercell_virtual_coords_0"]
         scaling_factor_t = priors["scaling_factor_0"]
 
-        # Initialize element when dng=True (Discrete Flow Matching with Masking)
-        if self.dng:
-            prim_slab_element_t = torch.zeros(
-                (batch_size, num_prim_slab_atoms),
-                dtype=torch.long,
-                device=self.device
-            )
-        else:
-            prim_slab_element_t = None
-
         # Initialize lists to store trajectories if requested
         prim_slab_coord_trajectory = [prim_slab_coords_t] if return_trajectory else None
         ads_coord_trajectory = [ads_coords_t] if return_trajectory else None
@@ -802,15 +724,12 @@ class AtomFlowMatching(Module):
                 time=t.item(),
                 training=False,
                 network_condition_kwargs=network_condition_kwargs,
-                noised_prim_slab_element=prim_slab_element_t,
             )
             pred_prim_slab_coords_1 = net_result["denoised_prim_slab_coords"]
             pred_ads_coords_1 = net_result["denoised_ads_coords"]
             pred_prim_virtual_1 = net_result["denoised_prim_virtual_coords"]
             pred_supercell_virtual_1 = net_result["denoised_supercell_virtual_coords"]
             pred_scaling_factor_1 = net_result["denoised_scaling_factor"]
-            if self.dng:
-                pred_element_1 = net_result.get("denoised_prim_slab_element")
 
             # Calculate the flow (vector field) using helper for numerical stability
             flow_prim_slab_coords = compute_flow_vector(pred_prim_slab_coords_1, prim_slab_coords_t, t.item())
@@ -826,23 +745,6 @@ class AtomFlowMatching(Module):
             prim_virtual_coords_t = prim_virtual_coords_t + flow_prim_virtual * dt
             supercell_virtual_coords_t = supercell_virtual_coords_t + flow_supercell_virtual * dt
             scaling_factor_t = scaling_factor_t + flow_scaling_factor * dt
-            
-            # Update element when dng=True (Rate-based unmask, OMatG-style)
-            if self.dng:
-                # Model predicts logits → convert to probabilities → sample
-                pred_element_logits = pred_element_1  # (B*mult, N, NUM_ELEMENTS)
-                x_1_probs = F.softmax(pred_element_logits, dim=-1)  # (B*mult, N, NUM_ELEMENTS)
-                x_1 = torch.distributions.Categorical(x_1_probs).sample() + 1  # (B*mult, N), 1-indexed
-
-                # Rate-based transition (OMatG DiscreteFlowMatchingMask style)
-                # Unmask rate: dt / (1 - t), clamped to [0, 1] for valid probability
-                # Higher rate as t approaches 1 (more aggressive unmasking near the end)
-                unmask_rate = (dt / (1.0 - t + FLOW_EPSILON)).clamp(0.0, 1.0)
-                will_unmask = torch.rand_like(prim_slab_element_t.float()) < unmask_rate
-                will_unmask = will_unmask & (prim_slab_element_t == MASK_TOKEN_INDEX)  # Only unmask MASK tokens
-
-                # Apply unmask transition
-                prim_slab_element_t = torch.where(will_unmask, x_1, prim_slab_element_t)
 
             # Ensure padding atoms remain at zero
             prim_slab_coords_t = prim_slab_coords_t * prim_slab_atom_mask.unsqueeze(-1)
@@ -915,20 +817,6 @@ class AtomFlowMatching(Module):
             "sampled_supercell_virtual_coords": final_supercell_virtual_coords,  # (batch_size * multiplicity, 3, 3) raw space
             "sampled_scaling_factor": final_scaling_factor,  # (batch_size * multiplicity,) raw value
         }
-        
-        # Final element handling when dng=True (Discrete Flow Matching)
-        if self.dng:
-            # Final step: unmask all remaining MASK tokens using last prediction from loop
-            # pred_element_1 already contains the model's prediction from the last iteration
-            x_1_probs = F.softmax(pred_element_1, dim=-1)
-            x_1_final = torch.distributions.Categorical(x_1_probs).sample() + 1  # 1-indexed
-            
-            # Unmask all remaining MASK tokens
-            remaining_masks = (prim_slab_element_t == MASK_TOKEN_INDEX)
-            final_prim_slab_element = torch.where(remaining_masks, x_1_final, prim_slab_element_t)
-            
-            # prim_slab_element_t is already integer tensor (1-indexed)
-            output["sampled_prim_slab_element"] = final_prim_slab_element  # (batch_size * multiplicity, N)
 
         if return_trajectory:
             # Only append final refined values if refine_final=True

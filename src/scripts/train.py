@@ -92,9 +92,6 @@ def create_model(config: dict) -> EffCatModule:
     validation_config = config["validation"]
     prediction_config = config.get("prediction", {})
 
-    # Extract dng from flow_model_args
-    dng = model_config["flow_model_args"].get("dng", False)
-
     model = EffCatModule(
         atom_s=model_config["atom_s"],
         token_s=model_config["token_s"],
@@ -107,7 +104,6 @@ def create_model(config: dict) -> EffCatModule:
             "prim_virtual_loss_weight": training_config["prim_virtual_loss_weight"],
             "supercell_virtual_loss_weight": training_config["supercell_virtual_loss_weight"],
             "scaling_factor_loss_weight": training_config["scaling_factor_loss_weight"],
-            "prim_slab_element_loss_weight": training_config.get("prim_slab_element_loss_weight", 5.0),
             "loss_space": training_config.get("loss_space", "raw"),
             # Optimizer configuration
             "optimizer": training_config.get("optimizer", "adamw"),
@@ -127,7 +123,6 @@ def create_model(config: dict) -> EffCatModule:
         prior_sampler_args=model_config["prior_sampler_args"],
         predict_args=prediction_config,
         use_kernels=model_config.get("use_kernels", False),
-        dng=dng,
         use_ema=training_config.get("use_ema", False),
         ema_decay=training_config.get("ema_decay", 0.9999),
     )

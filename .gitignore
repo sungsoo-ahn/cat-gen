@@ -31,6 +31,9 @@ ENV/
 /processing_results/
 *.tar.gz
 
+# Weights & Biases
+wandb/
+
 # Resources (cloned repos, reference materials)
 resources/
 

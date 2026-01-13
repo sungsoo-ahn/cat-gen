@@ -44,7 +44,6 @@ model:
     atom_decoder_heads: 4
     attention_impl: "flash"
     activation_checkpointing: false
-    dng: false  # Structure prediction mode
     # Output initialization for lower initial loss
     coord_output_scale: 1.0  # Reduced from 3.0 to bound initial predictions tighter
     output_init: "zero"  # Zero-init output layers so predictions start at 0
@@ -113,7 +112,6 @@ training:
   prim_virtual_loss_weight: 1.0
   supercell_virtual_loss_weight: 1.0
   scaling_factor_loss_weight: 1.0
-  prim_slab_element_loss_weight: 5.0
 
   lr: 0.0001
   weight_decay: 0.01
@@ -143,8 +141,6 @@ validation:
   sampling_center_coords: false
   timeout: 120
   num_workers: 4
-  n_prim_slab_atoms_histogram_path: "primitive_atom_distribution.json"
-  max_n_prim_slab_atoms: null
   compute_adsorption: false
   adsorption_device: "cuda"
   adsorption_model: "uma-m-1p1"

@@ -22,11 +22,6 @@ FLOW_EPSILON = 1e-5
 # Elements 1-100 (H to Fm)
 NUM_ELEMENTS = 100
 
-# Discrete Flow Matching constants (for dng=True mode)
-# Mask token is index 0, actual elements are 1-100
-MASK_TOKEN_INDEX = 0
-NUM_ELEMENTS_WITH_MASK = NUM_ELEMENTS + 1  # 101 total (0=MASK, 1-100=elements)
-
 # =============================================================================
 # Loss Scaling
 # =============================================================================

@@ -130,7 +130,6 @@ class EffCatModule(LightningModule):
         prior_sampler_args: dict[str, Any],
         predict_args: Optional[dict[str, Any]] = None,
         use_kernels: bool = False,
-        dng: bool = False,
         use_ema: bool = False,
         ema_decay: float = 0.9999,
     ) -> None:
@@ -141,13 +140,6 @@ class EffCatModule(LightningModule):
         self.training_args = training_args
         self.validation_args = validation_args
         self.predict_args = predict_args
-        
-        # Use dng from flow_model_args if not explicitly provided at top level
-        # This ensures consistency: flow_model_args.dng is the source of truth
-        if "dng" in flow_model_args:
-            dng = flow_model_args["dng"]
-        
-        self.dng = dng
 
         # Kernels
         self.use_kernels = use_kernels
@@ -193,32 +185,8 @@ class EffCatModule(LightningModule):
                 **flow_model_args,
             },
             prior_sampler=prior_sampler,
-            dng=dng,
             **flow_kwargs,
         )
-        
-        # Load and cache histogram JSON file when dng=True
-        if self.dng:
-            histogram_path = self.validation_args.get("n_prim_slab_atoms_histogram_path")
-            if histogram_path is not None:
-                # Handle relative paths relative to project root
-                if not os.path.isabs(histogram_path):
-                    # Find project root path (relative to current file)
-                    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-                    histogram_path = os.path.join(project_root, histogram_path)
-
-                with open(histogram_path, 'r') as f:
-                    histogram_data = json.load(f)
-
-                # JSON structure: {"prim_slab_num_atoms_hist": [0.0, 0.0115, ...]}
-                self.n_prim_slab_atoms_hist = histogram_data["prim_slab_num_atoms_hist"]
-                # Index = number of atoms, value = probability
-                # max_n_prim_slab_atoms is histogram length - 1 (since indices start from 0)
-                self.max_n_prim_slab_atoms = len(self.n_prim_slab_atoms_hist) - 1
-            else:
-                # Default: uniform distribution for atoms 1-20
-                self.n_prim_slab_atoms_hist = [0.0] + [1.0/20]*20
-                self.max_n_prim_slab_atoms = 20
 
         # EMA (Exponential Moving Average) for improved generation quality
         self.use_ema = use_ema
@@ -246,104 +214,6 @@ class EffCatModule(LightningModule):
             self._ema.to(self.device)
             rank_zero_info(f"| EMA initialized with {len(self._ema.shadow_params)} shadow parameters on {self.device}")
 
-    def _prepare_dng_sampling_feats(
-        self,
-        feats: dict[str, Tensor],
-        multiplicity: int,
-    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
-        """Prepare features for DNG (dynamic number generation) sampling mode.
-
-        This method samples the number of primitive slab atoms from a histogram,
-        creates dynamic masks, and expands all feature tensors for multiplicity.
-
-        Args:
-            feats: Input feature dictionary
-            multiplicity: Number of samples per input
-
-        Returns:
-            Tuple of (prim_slab_atom_mask, ads_atom_mask, modified_feats)
-        """
-        batch_size = feats["ref_prim_slab_element"].shape[0]
-        original_n = feats["prim_slab_cart_coords"].shape[1]
-
-        # Sample number of atoms from histogram
-        # Normalize probabilities to ensure they sum exactly to 1.0 (floating-point fix)
-        n_atoms_indices = np.arange(len(self.n_prim_slab_atoms_hist))
-        probs = np.array(self.n_prim_slab_atoms_hist, dtype=np.float64)
-        probs = probs / probs.sum()
-        sampled_n_atoms = np.random.choice(
-            n_atoms_indices,
-            size=batch_size * multiplicity,
-            p=probs,
-            replace=True
-        ).tolist()
-
-        max_n = max(sampled_n_atoms) if sampled_n_atoms else self.max_n_prim_slab_atoms
-
-        # Create dynamic prim_slab_atom_mask
-        prim_slab_atom_mask = torch.zeros(
-            (batch_size * multiplicity, max_n),
-            dtype=torch.bool,
-            device=self.device
-        )
-        for i, n in enumerate(sampled_n_atoms):
-            prim_slab_atom_mask[i, :n] = True
-
-        # Create prim_slab_atom_to_token
-        feats["prim_slab_atom_to_token"] = torch.eye(
-            max_n, device=self.device
-        ).unsqueeze(0).expand(batch_size * multiplicity, -1, -1)
-
-        # Resize target for prim_slab tensors (only if size changed)
-        target_n = max_n if max_n != original_n else None
-
-        # Define tensor groups with their expansion configs
-        # (key, needs_resize, pad_value)
-        prim_slab_tensors = [
-            ("prim_slab_cart_coords", True, 0.0),
-            ("prim_slab_atom_pad_mask", True, 0),
-            ("ref_prim_slab_element", True, 0),
-            ("prim_slab_token_pad_mask", True, 0),
-        ]
-
-        ads_tensors = [
-            ("ads_atom_to_token", False, 0),
-            ("ads_cart_coords", False, 0.0),
-            ("ads_atom_pad_mask", False, 0),
-            ("ads_token_pad_mask", False, 0),
-            ("ref_ads_element", False, 0),
-            ("ref_ads_pos", False, 0.0),
-            ("bind_ads_atom", False, 0),
-        ]
-
-        global_tensors = [
-            ("lattice", False, 0.0),
-            ("supercell_matrix", False, 0),
-            ("scaling_factor", False, 0.0),
-        ]
-
-        # Expand prim_slab tensors (with optional resize)
-        for key, needs_resize, pad_value in prim_slab_tensors:
-            if key in feats:
-                resize_target = target_n if needs_resize else None
-                feats[key] = expand_tensor_for_multiplicity(
-                    feats[key], multiplicity, resize_target, pad_value
-                )
-
-        # Expand ads tensors
-        for key, _, pad_value in ads_tensors:
-            if key in feats:
-                feats[key] = feats[key].repeat_interleave(multiplicity, dim=0)
-
-        # Expand global tensors
-        for key, _, _ in global_tensors:
-            if key in feats:
-                feats[key] = feats[key].repeat_interleave(multiplicity, dim=0)
-
-        ads_atom_mask = feats["ads_atom_pad_mask"]
-
-        return prim_slab_atom_mask, ads_atom_mask, feats
-    
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Called when checkpoint is loaded. Use this to verify optimizer state."""
         if self.global_rank == 0:  # Only log on rank 0
@@ -425,14 +295,8 @@ class EffCatModule(LightningModule):
             )
         else:
             # Returns sampled structure
-            # When dng=True: sample n_prim_slab_atoms from histogram and dynamically create mask
-            if self.dng:
-                prim_slab_atom_mask, ads_atom_mask, feats = self._prepare_dng_sampling_feats(
-                    feats, multiplicity_flow_sample
-                )
-            else:
-                prim_slab_atom_mask = feats["prim_slab_atom_pad_mask"]
-                ads_atom_mask = feats["ads_atom_pad_mask"]
+            prim_slab_atom_mask = feats["prim_slab_atom_pad_mask"]
+            ads_atom_mask = feats["ads_atom_pad_mask"]
 
             network_condition_kwargs = dict(
                 feats=feats,
@@ -487,10 +351,6 @@ class EffCatModule(LightningModule):
             + self.training_args["scaling_factor_loss_weight"]
             * flow_loss_dict["scaling_factor_loss"].mean()
         )
-        
-        # Add prim_slab_element_loss when dng=True
-        if self.dng and "prim_slab_element_loss" in flow_loss_dict:
-            total_loss = total_loss + self.training_args.get("prim_slab_element_loss_weight", 1.0) * flow_loss_dict["prim_slab_element_loss"].mean()
 
         # Loggings
         batch_size = batch["ref_prim_slab_element"].shape[0]
@@ -565,8 +425,8 @@ class EffCatModule(LightningModule):
         step_time = time.time() - step_start_time
         self.log("train/throughput/samples_per_second", batch_size / step_time)
 
-        # Cache training samples for train match rate comparison (structure prediction only)
-        if not self.dng and len(self._train_sample_cache) < self._max_train_cache_size:
+        # Cache training samples for train match rate comparison
+        if len(self._train_sample_cache) < self._max_train_cache_size:
             # Cache ground truth structures for comparison during validation
             for i in range(min(batch_size, self._max_train_cache_size - len(self._train_sample_cache))):
                 # Store on CPU to save GPU memory
@@ -639,12 +499,7 @@ class EffCatModule(LightningModule):
             "ads_atom_mask": batch["ads_atom_pad_mask"],
         }
         
-        # Use sampled_prim_slab_element when dng=True, ref_prim_slab_element when dng=False
-        if self.dng:
-            return_dict["prim_slab_atom_types"] = out.get("sampled_prim_slab_element", batch["ref_prim_slab_element"])
-        else:
-            return_dict["prim_slab_atom_types"] = batch["ref_prim_slab_element"]
-        
+        return_dict["prim_slab_atom_types"] = batch["ref_prim_slab_element"]
         return_dict["ads_atom_types"] = batch["ref_ads_element"]
         self.validation_step_outputs.append(return_dict)
 
@@ -1076,42 +931,40 @@ class EffCatModule(LightningModule):
                 # Prepare tasks for each item in the batch
                 batch_size = sampled_prim_slab_coords.shape[0]
                 for i in range(batch_size):
-                    # Add RMSD tasks only when dng=False (excluded when dng=True)
-                    if not self.dng:
-                        # RMSD task (primitive slab only)
-                        prim_rmsd_tasks.append(
-                            (
-                                sampled_prim_slab_coords[i],
-                                sampled_lattices[i],
-                                true_prim_slab_coords[i],
-                                true_lattices[i],
-                                prim_slab_atom_types[i],
-                                prim_slab_atom_mask[i],
-                                self.matcher_kwargs,
-                            )
+                    # RMSD task (primitive slab only)
+                    prim_rmsd_tasks.append(
+                        (
+                            sampled_prim_slab_coords[i],
+                            sampled_lattices[i],
+                            true_prim_slab_coords[i],
+                            true_lattices[i],
+                            prim_slab_atom_types[i],
+                            prim_slab_atom_mask[i],
+                            self.matcher_kwargs,
                         )
-                        
-                        # Slab RMSD task (full system after assemble)
-                        slab_rmsd_tasks.append(
-                            (
-                                sampled_prim_slab_coords[i],
-                                sampled_ads_coords[i],
-                                sampled_lattices[i],
-                                sampled_supercell_matrices[i],
-                                sampled_scaling_factors[i],
-                                true_prim_slab_coords[i],
-                                true_ads_coords[i],
-                                true_lattices[i],
-                                true_supercells[i],
-                                float(true_scaling_factors[i]),
-                                prim_slab_atom_types[i],
-                                ads_atom_types[i],
-                                prim_slab_atom_mask[i],
-                                ads_atom_mask[i],
-                                self.matcher_kwargs,
-                            )
+                    )
+
+                    # Slab RMSD task (full system after assemble)
+                    slab_rmsd_tasks.append(
+                        (
+                            sampled_prim_slab_coords[i],
+                            sampled_ads_coords[i],
+                            sampled_lattices[i],
+                            sampled_supercell_matrices[i],
+                            sampled_scaling_factors[i],
+                            true_prim_slab_coords[i],
+                            true_ads_coords[i],
+                            true_lattices[i],
+                            true_supercells[i],
+                            float(true_scaling_factors[i]),
+                            prim_slab_atom_types[i],
+                            ads_atom_types[i],
+                            prim_slab_atom_mask[i],
+                            ads_atom_mask[i],
+                            self.matcher_kwargs,
                         )
-                    
+                    )
+
                     # Prim structural validity task (primitive slab only)
                     prim_validity_tasks.append(
                         (
@@ -1159,45 +1012,43 @@ class EffCatModule(LightningModule):
             timeout_seconds = self.validation_args["timeout"]
             num_workers = self.validation_args["num_workers"]
 
-            # Execute RMSD tasks only when dng=False (excluded when dng=True)
-            if not self.dng:
-                # Execute prim RMSD tasks in parallel
-                prim_rmsd_results_per_item = run_parallel_tasks(
-                    tasks=prim_rmsd_tasks,
-                    task_fn=find_best_match_rmsd_prim,
-                    num_workers=num_workers,
-                    timeout_seconds=timeout_seconds,
-                    task_name="Prim RMSD matching",
-                    default_result=[None] * n_samples,
-                )
+            # Execute prim RMSD tasks in parallel
+            prim_rmsd_results_per_item = run_parallel_tasks(
+                tasks=prim_rmsd_tasks,
+                task_fn=find_best_match_rmsd_prim,
+                num_workers=num_workers,
+                timeout_seconds=timeout_seconds,
+                task_name="Prim RMSD matching",
+                default_result=[None] * n_samples,
+            )
 
-                # Compute prim match rate and RMSD (primitive slab)
-                for result_list in prim_rmsd_results_per_item:
-                    valid_rmsds = [r for r in result_list if r is not None]
-                    if valid_rmsds:
-                        self.val_prim_match_rate.update(1.0)
-                        self.val_prim_rmsd.update(min(valid_rmsds))
-                    else:
-                        self.val_prim_match_rate.update(0.0)
+            # Compute prim match rate and RMSD (primitive slab)
+            for result_list in prim_rmsd_results_per_item:
+                valid_rmsds = [r for r in result_list if r is not None]
+                if valid_rmsds:
+                    self.val_prim_match_rate.update(1.0)
+                    self.val_prim_rmsd.update(min(valid_rmsds))
+                else:
+                    self.val_prim_match_rate.update(0.0)
 
-                # Execute slab RMSD tasks in parallel
-                slab_rmsd_results_per_item = run_parallel_tasks(
-                    tasks=slab_rmsd_tasks,
-                    task_fn=find_best_match_rmsd_slab,
-                    num_workers=num_workers,
-                    timeout_seconds=timeout_seconds,
-                    task_name="Slab RMSD matching",
-                    default_result=[None] * n_samples,
-                )
+            # Execute slab RMSD tasks in parallel
+            slab_rmsd_results_per_item = run_parallel_tasks(
+                tasks=slab_rmsd_tasks,
+                task_fn=find_best_match_rmsd_slab,
+                num_workers=num_workers,
+                timeout_seconds=timeout_seconds,
+                task_name="Slab RMSD matching",
+                default_result=[None] * n_samples,
+            )
 
-                # Compute slab match rate and RMSD
-                for result_list in slab_rmsd_results_per_item:
-                    valid_rmsds = [r for r in result_list if r is not None]
-                    if valid_rmsds:
-                        self.val_slab_match_rate.update(1.0)
-                        self.val_slab_rmsd.update(min(valid_rmsds))
-                    else:
-                        self.val_slab_match_rate.update(0.0)
+            # Compute slab match rate and RMSD
+            for result_list in slab_rmsd_results_per_item:
+                valid_rmsds = [r for r in result_list if r is not None]
+                if valid_rmsds:
+                    self.val_slab_match_rate.update(1.0)
+                    self.val_slab_rmsd.update(min(valid_rmsds))
+                else:
+                    self.val_slab_match_rate.update(0.0)
 
                 # Compute training match rate (compare generated samples against training set)
                 # This helps detect if the model is memorizing training data
@@ -1416,34 +1267,33 @@ class EffCatModule(LightningModule):
                             self.val_adsorption_energy.update(e_ads)
 
             # Log aggregated metrics
-            # Primitive slab RMSD (only when dng=False, as RMSD is not computed when dng=True)
-            if not self.dng:
-                self.log(
-                    "val/match_rate/primitive_slab", self.val_prim_match_rate.compute(), rank_zero_only=True
-                )
-                if self.val_prim_rmsd.update_count > 0:
-                    self.log("val/rmsd/primitive_slab", self.val_prim_rmsd.compute(), rank_zero_only=True)
-                else:
-                    self.log("val/rmsd/primitive_slab", float("nan"), rank_zero_only=True)
+            # Primitive slab RMSD
+            self.log(
+                "val/match_rate/primitive_slab", self.val_prim_match_rate.compute(), rank_zero_only=True
+            )
+            if self.val_prim_rmsd.update_count > 0:
+                self.log("val/rmsd/primitive_slab", self.val_prim_rmsd.compute(), rank_zero_only=True)
+            else:
+                self.log("val/rmsd/primitive_slab", float("nan"), rank_zero_only=True)
 
-                # Slab RMSD (whole slab after assemble) - only when dng=False
-                self.log(
-                    "val/match_rate/slab", self.val_slab_match_rate.compute(), rank_zero_only=True
-                )
-                if self.val_slab_rmsd.update_count > 0:
-                    self.log("val/rmsd/slab", self.val_slab_rmsd.compute(), rank_zero_only=True)
-                else:
-                    self.log("val/rmsd/slab", float("nan"), rank_zero_only=True)
+            # Slab RMSD (whole slab after assemble)
+            self.log(
+                "val/match_rate/slab", self.val_slab_match_rate.compute(), rank_zero_only=True
+            )
+            if self.val_slab_rmsd.update_count > 0:
+                self.log("val/rmsd/slab", self.val_slab_rmsd.compute(), rank_zero_only=True)
+            else:
+                self.log("val/rmsd/slab", float("nan"), rank_zero_only=True)
 
-                # Training match rate (compare generated samples against training set)
-                if self.val_train_prim_match_rate.update_count > 0:
-                    self.log(
-                        "val/match_rate/train_primitive",
-                        self.val_train_prim_match_rate.compute(),
-                        rank_zero_only=True,
-                    )
-                else:
-                    self.log("val/match_rate/train_primitive", float("nan"), rank_zero_only=True)
+            # Training match rate (compare generated samples against training set)
+            if self.val_train_prim_match_rate.update_count > 0:
+                self.log(
+                    "val/match_rate/train_primitive",
+                    self.val_train_prim_match_rate.compute(),
+                    rank_zero_only=True,
+                )
+            else:
+                self.log("val/match_rate/train_primitive", float("nan"), rank_zero_only=True)
 
             # Log prim structural validity (always computed, regardless of compute_adsorption)
             self.log(

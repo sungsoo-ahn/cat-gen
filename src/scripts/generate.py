@@ -93,15 +93,8 @@ def run_generation(
 
     # Prepare for sampling
     feats = batch
-
-    # Get masks - handle both dng and non-dng cases
-    if model.structure_module.dng:
-        prim_slab_atom_mask = feats["prim_slab_atom_pad_mask"]
-        ads_atom_mask = feats["ads_atom_pad_mask"]
-    else:
-        prim_slab_atom_mask = feats["prim_slab_atom_pad_mask"]
-        ads_atom_mask = feats["ads_atom_pad_mask"]
-
+    prim_slab_atom_mask = feats["prim_slab_atom_pad_mask"]
+    ads_atom_mask = feats["ads_atom_pad_mask"]
     network_condition_kwargs = dict(feats=feats)
 
     # Time the generation
@@ -167,12 +160,6 @@ def print_results(samples: dict, batch: dict, generation_time: float):
         gt_ads = batch["ads_cart_coords"]
         diff = (ads_coords - gt_ads).abs().mean()
         print(f"  Mean abs diff from GT (adsorbate): {diff.item():.4f}")
-
-    # Print element predictions if dng mode
-    if "sampled_prim_slab_element" in samples:
-        elements = samples["sampled_prim_slab_element"]
-        print(f"\n  Predicted elements shape: {elements.shape}")
-        print(f"    First sample elements: {elements[0].tolist()[:10]}...")
 
     return {
         "prim_coords_mean": prim_coords.mean().item(),

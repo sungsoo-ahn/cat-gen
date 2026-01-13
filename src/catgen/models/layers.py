@@ -11,8 +11,6 @@ from src.catgen.models.utils import LinearNoBias
 from src.catgen.models.transformers import DiT, PositionalEmbedder
 from src.catgen.constants import (
     NUM_ELEMENTS,
-    MASK_TOKEN_INDEX,
-    NUM_ELEMENTS_WITH_MASK,
     EPS_NUMERICAL,
 )
 
@@ -77,19 +75,11 @@ class AtomAttentionEncoder(Module):
         attention_impl,
         positional_encoding=False,
         activation_checkpointing=False,
-        dng: bool = False,
     ):
         super().__init__()
 
-        self.dng = dng
-
-        # Prim slab features: atom_pad_mask (1) + element one-hot
-        # dng=True: includes MASK token (NUM_ELEMENTS_WITH_MASK = 101)
-        # dng=False: no MASK token (NUM_ELEMENTS = 100)
-        if dng:
-            prim_slab_feature_dim = 1 + NUM_ELEMENTS_WITH_MASK  # 102
-        else:
-            prim_slab_feature_dim = 1 + NUM_ELEMENTS  # 101
+        # Prim slab features: atom_pad_mask (1) + element one-hot (NUM_ELEMENTS = 100)
+        prim_slab_feature_dim = 1 + NUM_ELEMENTS  # 101
         self.embed_prim_slab_features = LinearNoBias(prim_slab_feature_dim, atom_s)
 
         # Adsorbate features: ref_pos (3) + atom_pad_mask (1) + bind_atomic_num (1) + element one-hot (NUM_ELEMENTS)
@@ -120,7 +110,7 @@ class AtomAttentionEncoder(Module):
             activation_checkpointing=activation_checkpointing,
         )
 
-    def forward(self, prim_slab_x_t, ads_x_t, prim_virtual_t, supercell_virtual_t, sf_t, t, feats, multiplicity=1, prim_slab_element_t: Optional[torch.Tensor] = None):
+    def forward(self, prim_slab_x_t, ads_x_t, prim_virtual_t, supercell_virtual_t, sf_t, t, feats, multiplicity=1):
         """
         Args:
             prim_slab_x_t: (B*mult, N, 3) noisy prim_slab coordinates
@@ -141,66 +131,32 @@ class AtomAttentionEncoder(Module):
         M = feats["ads_cart_coords"].shape[1]
         B_mult = prim_slab_x_t.shape[0]
         device = prim_slab_x_t.device
-        dtype = prim_slab_x_t.dtype
 
         prim_slab_mask = feats["prim_slab_atom_pad_mask"].bool()
         ads_mask = feats["ads_atom_pad_mask"].bool()
 
         # === Prim slab features ===
-        # Features: atom_pad_mask (1) + element one-hot
-        # dng=True: prim_slab_element_t is integer tensor (0=MASK, 1-100=elements) → one-hot with MASK
-        # dng=False: use ref_prim_slab_element directly → one-hot without MASK
+        # Features: atom_pad_mask (1) + element one-hot (no MASK token)
         n_prim_slab = N  # Track actual prim_slab atom count for return value
-        if prim_slab_element_t is not None and self.dng:
-            # dng=True: prim_slab_element_t is integer tensor (B*mult, N_actual)
-            # Values: 0=MASK, 1-100=element atomic numbers
-            N_actual = prim_slab_element_t.shape[1]
-            B_x, N_x, _ = prim_slab_x_t.shape
-
-            # Ensure N_actual matches prim_slab_x_t shape
-            if N_actual != N_x:
-                n_prim_slab = N_x
-                prim_slab_element_t = prim_slab_element_t[:, :n_prim_slab]
-            else:
-                n_prim_slab = N_actual
-
-            # Convert integer tensor to one-hot with MASK token
-            # prim_slab_element_t: (B*mult, n_prim_slab) integer tensor (0=MASK, 1-100=elements)
-            clamped_element = _clamp_element_indices(
-                prim_slab_element_t, 0, NUM_ELEMENTS_WITH_MASK - 1, "prim_slab_element_t"
-            )
-            prim_slab_element_onehot = F.one_hot(
-                clamped_element.long(),
-                num_classes=NUM_ELEMENTS_WITH_MASK
-            ).float()  # (B*mult, n_prim_slab, NUM_ELEMENTS_WITH_MASK)
-
-            # mask needs multiplicity applied and sliced to match n_prim_slab
-            prim_slab_mask_for_feats = feats["prim_slab_atom_pad_mask"].repeat_interleave(multiplicity, 0)
-            prim_slab_mask_for_feats = prim_slab_mask_for_feats[:, :n_prim_slab]
-        else:
-            # dng=False: existing approach (no MASK token)
-            clamped_element = _clamp_element_indices(
-                feats["ref_prim_slab_element"], 0, NUM_ELEMENTS - 1, "ref_prim_slab_element"
-            )
-            prim_slab_element_onehot = F.one_hot(
-                clamped_element,
-                num_classes=NUM_ELEMENTS
-            ).float()  # (B, N, NUM_ELEMENTS)
-            prim_slab_mask_for_feats = feats["prim_slab_atom_pad_mask"]  # (B, N)
+        clamped_element = _clamp_element_indices(
+            feats["ref_prim_slab_element"], 0, NUM_ELEMENTS - 1, "ref_prim_slab_element"
+        )
+        prim_slab_element_onehot = F.one_hot(
+            clamped_element,
+            num_classes=NUM_ELEMENTS
+        ).float()  # (B, N, NUM_ELEMENTS)
+        prim_slab_mask_for_feats = feats["prim_slab_atom_pad_mask"]  # (B, N)
 
         prim_slab_feats = torch.cat([
-            prim_slab_mask_for_feats.unsqueeze(-1),  # (B*mult, N, 1) or (B, N, 1)
-            prim_slab_element_onehot,  # (B*mult, N, NUM_ELEMENTS) or (B, N, NUM_ELEMENTS)
+            prim_slab_mask_for_feats.unsqueeze(-1),  # (B, N, 1)
+            prim_slab_element_onehot,  # (B, N, NUM_ELEMENTS)
         ], dim=-1)
 
-        c_prim_slab = self.embed_prim_slab_features(prim_slab_feats)  # (B*mult, N, atom_s) or (B, N, atom_s)
+        c_prim_slab = self.embed_prim_slab_features(prim_slab_feats)  # (B, N, atom_s)
 
-        # Apply multiplicity only when not in dng mode with prim_slab_element_t
-        if prim_slab_element_t is None or not self.dng:
-            # Existing approach: (B, N, atom_s) -> (B*mult, N, atom_s)
-            c_prim_slab = c_prim_slab.repeat_interleave(multiplicity, 0)
-            # Also expand mask for joint_mask concatenation
-            prim_slab_mask_for_feats = prim_slab_mask_for_feats.repeat_interleave(multiplicity, 0)
+        # Apply multiplicity: (B, N, atom_s) -> (B*mult, N, atom_s)
+        c_prim_slab = c_prim_slab.repeat_interleave(multiplicity, 0)
+        prim_slab_mask_for_feats = prim_slab_mask_for_feats.repeat_interleave(multiplicity, 0)
 
         # === Adsorbate features ===
         # Features: atom_pad_mask (1) + element one-hot (NUM_ELEMENTS)
@@ -308,13 +264,11 @@ class AtomAttentionDecoder(Module):
         atom_decoder_heads,
         attention_impl,
         activation_checkpointing=False,
-        dng: bool = False,
         coord_output_scale: float = 3.0,
         output_init: str = "default",
         output_init_scale: float = 0.01,
     ):
         super().__init__()
-        self.dng = dng
         self.atom_decoder = DiT(
             dim=atom_s,
             depth=atom_decoder_depth,
@@ -354,14 +308,6 @@ class AtomAttentionDecoder(Module):
         self.virtual_coord_output_scale = coord_output_scale
         self.scaling_factor_output_scale = coord_output_scale
 
-        # Add element prediction head when dng=True
-        if dng:
-            # Output logits (softmax is applied during loss/vector field computation)
-            self.feats_to_prim_slab_element = nn.Sequential(
-                nn.LayerNorm(atom_s),
-                LinearNoBias(atom_s, NUM_ELEMENTS)  # output logits
-            )
-
         # Initialize output projection layers
         self._init_output_layers(output_init, output_init_scale)
 
@@ -379,8 +325,6 @@ class AtomAttentionDecoder(Module):
             self.feats_to_supercell_virtual_coords,
             self.feats_to_scaling_factor,
         ]
-        if self.dng:
-            projections.append(self.feats_to_prim_slab_element)
 
         for proj in projections:
             linear = proj[-1]  # Last layer is LinearNoBias
@@ -452,26 +396,13 @@ class AtomAttentionDecoder(Module):
         sf_update = self.feats_to_scaling_factor(x_global).squeeze(-1)  # (B*mult,)
         sf_update = torch.tanh(sf_update) * self.scaling_factor_output_scale
 
-        # Add element prediction when dng=True
-        if hasattr(self, 'feats_to_prim_slab_element'):
-            prim_slab_element_update = self.feats_to_prim_slab_element(x_prim_slab)
-            # (B*mult, N, NUM_ELEMENTS) - logits format (softmax is applied during loss/vector field computation)
-            return {
-                "prim_slab_r_update": prim_slab_r_update,
-                "ads_r_update": ads_r_update,
-                "prim_virtual_update": prim_virtual_update,
-                "supercell_virtual_update": supercell_virtual_update,
-                "sf_update": sf_update,
-                "prim_slab_element_update": prim_slab_element_update,
-            }
-        else:
-            return {
-                "prim_slab_r_update": prim_slab_r_update,
-                "ads_r_update": ads_r_update,
-                "prim_virtual_update": prim_virtual_update,
-                "supercell_virtual_update": supercell_virtual_update,
-                "sf_update": sf_update,
-            }
+        return {
+            "prim_slab_r_update": prim_slab_r_update,
+            "ads_r_update": ads_r_update,
+            "prim_virtual_update": prim_virtual_update,
+            "supercell_virtual_update": supercell_virtual_update,
+            "sf_update": sf_update,
+        }
 
 
 class TokenTransformer(Module):

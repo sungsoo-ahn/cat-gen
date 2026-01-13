@@ -46,7 +46,6 @@ model:
     atom_decoder_heads: 4
     attention_impl: "flash"  # "pytorch", "xformers", "manual", "flash" (uses scaled_dot_product_attention)
     activation_checkpointing: false
-    dng: false  # Structure prediction mode (no element generation)
 
   # Prior sampler arguments (computed from dataset statistics)
   prior_sampler_args:
@@ -118,7 +117,6 @@ training:
   prim_virtual_loss_weight: 1.0
   supercell_virtual_loss_weight: 1.0
   scaling_factor_loss_weight: 1.0
-  prim_slab_element_loss_weight: 5.0  # Used when dng=True
 
   # Optimizer
   lr: 0.0001
@@ -152,9 +150,6 @@ validation:
   sampling_center_coords: false
   timeout: 120
   num_workers: 4
-  # DNG-specific settings
-  n_prim_slab_atoms_histogram_path: "primitive_atom_distribution.json"
-  max_n_prim_slab_atoms: null
   # Adsorption energy evaluation
   compute_adsorption: false
   adsorption_device: "cuda"
