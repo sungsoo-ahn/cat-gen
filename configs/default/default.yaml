@@ -1,12 +1,12 @@
-# Flattened configuration for MinCatFlow (original implementation)
-# Converted from Hydra configs to simple YAML per CLAUDE.md guidelines
+# CatGen - Catalyst structure generation with flow matching
+# Configuration per CLAUDE.md guidelines
 
 # Required field per CLAUDE.md
 output_dir: "data/catgen/default"
 
 # Experiment metadata
 experiment:
-  name: "mincatflow_catgen"
+  name: "catgen"
   version: "1.0.0"
   seed: 42
   deterministic: true

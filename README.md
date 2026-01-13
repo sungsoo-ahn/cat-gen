@@ -1,6 +1,6 @@
 # CatGen: Catalyst Structure Generation with Flow Matching
 
-A PyTorch implementation of **MinCatFlow** - a flow matching generative model for catalyst structure generation. This project generates realistic atomic structures of adsorbate+catalyst systems for materials science research.
+A PyTorch implementation of **CatGen** - a flow matching generative model for catalyst structure generation. This project generates realistic atomic structures of adsorbate+catalyst systems for materials science research.
 
 ## Overview
 
@@ -15,7 +15,6 @@ The model uses **flow matching** - a diffusion-based generative approach that le
 ## Features
 
 - Flow matching with Diffusion Transformer (DiT) backbone
-- Dynamic Nuclear Graph (DNG) mode for element prediction
 - Support for OC20 dataset processing
 - WandB integration for experiment tracking
 - PyTorch Lightning training framework
@@ -50,7 +49,7 @@ Download and process OC20 (Open Catalyst 2020) data:
 # Download OC20 dataset (requires ~50GB disk space)
 bash scripts/data/download_data.sh oc20
 
-# Convert to MinCatFlow format (outputs to processing_results/)
+# Convert to CatGen format (outputs to processing_results/)
 bash scripts/data/convert_oc20.sh train
 bash scripts/data/convert_oc20.sh val_id
 ```
@@ -67,22 +66,15 @@ bash scripts/training/run_train.sh
 PYTHONPATH=. uv run python src/scripts/train.py configs/default/test.yaml
 ```
 
-**Training modes** (set in config):
-- `dng: true` - De novo generation (predicts elements + coordinates)
-- `dng: false` - Structure prediction (predicts coordinates only)
-
 ### 3. Generate Structures
 
 ```bash
-# De novo generation (with DNG mode - predicts elements)
+# Generate structures using trained model
 PYTHONPATH=. uv run python src/scripts/generate.py \
-    configs/default/test.yaml \
-    --checkpoint data/catgen/test_wandb/checkpoints/last.ckpt \
+    configs/default/default.yaml \
+    --checkpoint data/catgen/default/checkpoints/last.ckpt \
     --num_samples 10 \
     --sampling_steps 50
-
-# Structure prediction (without DNG - uses ground truth elements)
-# Set dng: false in config before training
 ```
 
 ## Project Structure
@@ -90,19 +82,19 @@ PYTHONPATH=. uv run python src/scripts/generate.py \
 ```
 cat-gen/
 ├── src/                          # Python source code
-│   ├── catgen/                   # MinCatFlow implementation
+│   ├── catgen/                   # CatGen implementation
 │   │   ├── data/                 # Data loading and processing
 │   │   ├── models/               # Neural network architectures
 │   │   │   ├── layers.py         # Encoder/Decoder layers
 │   │   │   ├── transformers.py   # DiT blocks
 │   │   │   └── loss/             # Loss functions and validation
 │   │   └── module/               # PyTorch Lightning modules
-│   │       ├── effcat_module.py  # Main training module
+│   │       ├── catgen_module.py  # Main training module
 │   │       └── flow.py           # Flow matching logic
 │   ├── scripts/                  # Entry point scripts
 │   │   ├── train.py              # Training script
-│   │   ├── generate.py           # De novo generation script
-│   │   └── oc20_to_mincatflow.py # OC20 to MinCatFlow conversion
+│   │   ├── generate.py           # Structure generation script
+│   │   └── oc20_to_catgen.py     # OC20 to CatGen conversion
 │   ├── helpers.py                # Utility functions
 │   └── utils.py                  # Common utilities
 ├── configs/                      # YAML configuration files
@@ -123,7 +115,7 @@ cat-gen/
 
 ## Model Architecture
 
-MinCatFlow uses a three-stage architecture:
+CatGen uses a three-stage architecture:
 
 ```
 Input → AtomAttentionEncoder → TokenTransformer → AtomAttentionDecoder → Output
@@ -139,58 +131,6 @@ Input → AtomAttentionEncoder → TokenTransformer → AtomAttentionDecoder →
 
 3. **AtomAttentionDecoder**: Broadcasts tokens back to atom level
    - Outputs: coordinates, lattice parameters, supercell matrix, scaling factor
-   - Optional: element predictions (DNG mode)
-
-## Usage Modes
-
-MinCatFlow supports two primary usage modes:
-
-### 1. Structure Prediction Mode (`dng: false`)
-
-In this mode, the model predicts **atomic coordinates only** given known element types. Use this when:
-- You know the composition of the catalyst (which elements are present)
-- You want to predict/refine atomic positions for a known material
-- You're doing structure relaxation or optimization
-
-```yaml
-# configs/*/default.yaml
-model:
-  flow_model_args:
-    dng: false  # Disable element prediction
-```
-
-**Inputs**: Element types, lattice hints, adsorbate composition
-**Outputs**: Optimized coordinates, lattice parameters, supercell matrix
-
-### 2. De Novo Generation Mode (`dng: true`)
-
-In this mode, the model predicts **both elements AND coordinates** from scratch. Use this when:
-- You want to discover new catalyst compositions
-- You're exploring the chemical space of possible catalysts
-- You want fully generative structure prediction
-
-```yaml
-# configs/*/default.yaml
-model:
-  flow_model_args:
-    dng: true   # Enable element prediction (Dynamic Nuclear Graph)
-
-training:
-  prim_slab_element_loss_weight: 5.0  # Weight for element prediction loss
-```
-
-**Inputs**: Structure size/shape constraints
-**Outputs**: Predicted elements, coordinates, lattice parameters, supercell matrix
-
-### Mode Comparison
-
-| Feature | Structure Prediction | De Novo Generation |
-|---------|---------------------|-------------------|
-| Element types | Given as input | Predicted by model |
-| Use case | Refine known materials | Discover new materials |
-| Config setting | `dng: false` | `dng: true` |
-| Additional loss | None | `prim_slab_element_loss` |
-| Output | Coordinates only | Elements + Coordinates |
 
 ## Configuration
 
@@ -199,30 +139,29 @@ Key configuration options in `configs/*/default.yaml`:
 ```yaml
 # Model architecture
 model:
-  atom_s: 768                    # Atom embedding dimension
-  token_s: 768                   # Token embedding dimension
+  atom_s: 256                    # Atom embedding dimension
+  token_s: 256                   # Token embedding dimension
   flow_model_args:
-    atom_encoder_depth: 6        # Encoder layers
-    token_transformer_depth: 12  # Transformer layers
-    atom_decoder_depth: 6        # Decoder layers
-    dng: true                    # Enable element prediction
+    atom_encoder_depth: 2        # Encoder layers
+    token_transformer_depth: 4   # Transformer layers
+    atom_decoder_depth: 2        # Decoder layers
 
 # Training
 training:
-  max_epochs: 1000
+  max_epochs: 20
   lr: 0.0001
   gradient_clip_val: 10.0
 
   # Loss weights
   prim_slab_coord_loss_weight: 1.0
-  ads_coord_loss_weight: 0.1
-  length_loss_weight: 1.0
-  angle_loss_weight: 0.01
-  supercell_matrix_loss_weight: 1.0
+  ads_coord_loss_weight: 1.0
+  prim_virtual_loss_weight: 1.0
+  supercell_virtual_loss_weight: 1.0
+  scaling_factor_loss_weight: 1.0
 
 # Validation
 validation:
-  sample_every_n_epochs: 5
+  sample_every_n_epochs: 2
   sampling_steps: 50
 ```
 
@@ -232,7 +171,7 @@ validation:
 - PyTorch Geometric Data objects in LMDB format
 - Contains: atomic positions, atomic numbers, tags (0/1=surface, 2=adsorbate)
 
-### Processed (MinCatFlow LMDB)
+### Processed (CatGen LMDB)
 Each entry contains:
 ```python
 {
@@ -295,8 +234,8 @@ Key dependencies (see `pyproject.toml` for full list):
 If you use this code, please cite:
 
 ```bibtex
-@article{mincatflow2024,
-  title={MinCatFlow: Flow Matching for Catalyst Structure Generation},
+@article{catgen2024,
+  title={CatGen: Catalyst Structure Generation with Flow Matching},
   author={...},
   journal={...},
   year={2024}

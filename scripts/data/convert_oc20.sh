@@ -1,5 +1,5 @@
 #!/bin/bash
-# Convert OC20 IS2RE LMDB directly to MinCatFlow LMDB format
+# Convert OC20 IS2RE LMDB directly to CatGen LMDB format
 #
 # Simplified pipeline that skips the intermediate CSV step.
 #
@@ -55,7 +55,7 @@ if [ ! -f "$LMDB_PATH" ]; then
 fi
 
 echo "============================================"
-echo "OC20 to MinCatFlow Direct Conversion"
+echo "OC20 to CatGen Direct Conversion"
 echo "============================================"
 echo "Split: $SPLIT"
 echo "Input: $LMDB_PATH"
@@ -63,7 +63,7 @@ echo "Output: $OUTPUT_PATH"
 echo "Additional args: $@"
 echo ""
 
-uv run python src/scripts/oc20_to_mincatflow.py \
+uv run python src/scripts/oc20_to_catgen.py \
     --lmdb-path "$LMDB_PATH" \
     --mapping-path "$MAPPING_PATH" \
     --output-path "$OUTPUT_PATH" \

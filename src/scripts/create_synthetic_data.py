@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create synthetic test data for MinCatFlow.
+"""Create synthetic test data for CatGen.
 
 This creates a minimal LMDB dataset with fake catalyst structures
 for testing the training pipeline.

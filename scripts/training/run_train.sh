@@ -1,5 +1,5 @@
 #!/bin/bash
-# Train MinCatFlow model
+# Train CatGen model
 #
 # Usage:
 #   bash scripts/training/run_train.sh

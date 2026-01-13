@@ -691,7 +691,7 @@ loss_scaling = MSE(pred_scaling_factor, target_scaling_factor)
 
 ---
 
-### 8. Data Generation Changes (`scripts/oc20_to_mincatflow.py`)
+### 8. Data Generation Changes (`scripts/oc20_to_catgen.py`)
 
 **NO CHANGES REQUIRED** - Data generation remains the same:
 
@@ -866,7 +866,7 @@ Backward (model → assembly):
 10. `src/scripts/compute_virtual_atom_stats.py` - Compute normalizer statistics
 
 ### Files NOT Modified (Benefit of minimal changes)
-- `src/scripts/oc20_to_mincatflow.py` - NO CHANGES (data format unchanged)
+- `src/scripts/oc20_to_catgen.py` - NO CHANGES (data format unchanged)
 - LMDB datasets - NO CHANGES (no migration needed)
 
 ---

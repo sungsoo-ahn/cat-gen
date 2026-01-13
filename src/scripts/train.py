@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train MinCatFlow model.
+"""Train CatGen model.
 
 Usage:
     uv run python src/scripts/train.py configs/default/default.yaml
@@ -24,7 +24,7 @@ from lightning.pytorch.loggers import WandbLogger
 
 from src.utils import init_directory
 from src.catgen.data.datamodule import LMDBDataModule
-from src.catgen.module.effcat_module import EffCatModule
+from src.catgen.module.catgen_module import CatGen
 from src.catgen.callbacks import GradientNormMonitor
 
 
@@ -85,14 +85,14 @@ def build_callbacks(config: dict, output_dir: Path) -> list:
     return callbacks
 
 
-def create_model(config: dict) -> EffCatModule:
-    """Create EffCatModule from config."""
+def create_model(config: dict) -> CatGen:
+    """Create CatGen from config."""
     model_config = config["model"]
     training_config = config["training"]
     validation_config = config["validation"]
     prediction_config = config.get("prediction", {})
 
-    model = EffCatModule(
+    model = CatGen(
         atom_s=model_config["atom_s"],
         token_s=model_config["token_s"],
         flow_model_args=model_config["flow_model_args"],
@@ -232,7 +232,7 @@ def main(config_path: str, overwrite: bool = False, debug: bool = False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train MinCatFlow")
+    parser = argparse.ArgumentParser(description="Train CatGen")
     parser.add_argument("config_path", type=str, help="Path to config YAML")
     parser.add_argument(
         "--overwrite",

@@ -118,7 +118,7 @@ class CombinedMuonAdamW(torch.optim.Optimizer):
             self.adamw.load_state_dict(state_dict["adamw"])
 
 
-class EffCatModule(LightningModule):
+class CatGen(LightningModule):
     def __init__(
         self,
         atom_s: int,

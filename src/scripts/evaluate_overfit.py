@@ -21,7 +21,7 @@ import yaml
 import wandb
 from ase.io import write as ase_write
 
-from src.catgen.module.effcat_module import EffCatModule
+from src.catgen.module.catgen_module import CatGen
 from src.catgen.data.lmdb_dataset import LMDBCachedDataset, collate_fn_with_dynamic_padding
 from src.catgen.scripts.assemble import assemble
 from src.catgen.data.conversions import virtual_coords_to_lattice_and_supercell
@@ -33,9 +33,9 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def load_model(checkpoint_path: str, device: str = "cuda") -> EffCatModule:
+def load_model(checkpoint_path: str, device: str = "cuda") -> CatGen:
     """Load model from checkpoint."""
-    model = EffCatModule.load_from_checkpoint(
+    model = CatGen.load_from_checkpoint(
         checkpoint_path,
         map_location=device,
     )
@@ -83,7 +83,7 @@ def compute_coordinate_rmsd(
 
 
 def generate_with_trajectory(
-    model: EffCatModule,
+    model: CatGen,
     batch: dict[str, torch.Tensor],
     seed: int = 42,
 ) -> dict[str, Any]:

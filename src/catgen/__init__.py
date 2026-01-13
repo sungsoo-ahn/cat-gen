@@ -1,1 +1,1 @@
-"""MinCatFlow original implementation with minimal modifications."""
+"""CatGen - Catalyst structure generation with flow matching."""

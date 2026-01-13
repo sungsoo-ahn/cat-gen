@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Visualize the OC20 to MinCatFlow reconstruction process.
+"""Visualize the OC20 to CatGen reconstruction process.
 
 Shows step-by-step:
 1. Original slab (from OC20 metadata)

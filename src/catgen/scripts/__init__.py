@@ -1,1 +1,1 @@
-"""Helper scripts for MinCatFlow."""
+"""Helper scripts for CatGen."""

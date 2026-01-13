@@ -1,4 +1,4 @@
-"""De novo generation script for MinCatFlow models.
+"""De novo generation script for CatGen models.
 
 Generates new catalyst structures using trained flow matching models.
 
@@ -48,10 +48,10 @@ def create_datamodule(config: dict):
 
 def load_model(checkpoint_path: str):
     """Load model from checkpoint."""
-    from src.catgen.module.effcat_module import EffCatModule
+    from src.catgen.module.catgen_module import CatGen
 
     # Load model from checkpoint
-    model = EffCatModule.load_from_checkpoint(
+    model = CatGen.load_from_checkpoint(
         checkpoint_path,
         map_location="cuda" if torch.cuda.is_available() else "cpu",
     )
@@ -199,7 +199,7 @@ def main(config_path: str, checkpoint_path: str, num_samples: int, sampling_step
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="De novo generation with MinCatFlow")
+    parser = argparse.ArgumentParser(description="Structure generation with CatGen")
     parser.add_argument("config_path", type=str, help="Path to config file")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--num_samples", type=int, default=5, help="Number of samples to generate")

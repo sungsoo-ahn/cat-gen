@@ -1,9 +1,9 @@
 #!/bin/bash
-# Download and prepare data for MinCatFlow training
+# Download and prepare data for CatGen training
 #
-# MinCatFlow Data Format
-# ----------------------
-# MinCatFlow uses a CUSTOM LMDB format that is DIFFERENT from standard OC20/OC22 LMDBs.
+# CatGen Data Format
+# ------------------
+# CatGen uses a CUSTOM LMDB format that is DIFFERENT from standard OC20/OC22 LMDBs.
 # Each sample contains:
 #   - primitive_slab: ASE Atoms (decomposed primitive cell, NOT full supercell)
 #   - supercell_matrix: numpy array (3x3) that transforms primitive -> supercell
@@ -26,12 +26,12 @@
 #   - Run: uv run python src/scripts/create_synthetic_data.py
 #   - Creates: dataset/train/dataset.lmdb, dataset/val_id/dataset.lmdb
 #
-# Option 2: Download OC20 IS2RE data (standard OC20 format, NOT MinCatFlow format)
+# Option 2: Download OC20 IS2RE data (standard OC20 format, NOT CatGen format)
 #   - This script downloads standard OC20 LMDBs
-#   - These need conversion to MinCatFlow format (see scripts/data/convert_oc20.sh)
+#   - These need conversion to CatGen format (see scripts/data/convert_oc20.sh)
 #
-# Option 3: Get preprocessed MinCatFlow-format data from the authors
-#   - Contact: https://github.com/sungsoo-ahn/MinCatFlow
+# Option 3: Get preprocessed CatGen-format data from the authors
+#   - Contact: https://github.com/sungsoo-ahn/cat-gen
 #
 # Usage:
 #   bash scripts/data/download_data.sh [option]
@@ -50,7 +50,7 @@ OPTION="${1:-synthetic}"
 DATA_DIR="${DATA_DIR:-dataset}"
 
 echo "============================================"
-echo "MinCatFlow Data Preparation"
+echo "CatGen Data Preparation"
 echo "============================================"
 echo ""
 
@@ -67,14 +67,14 @@ case "$OPTION" in
         echo "Done! Synthetic data created at: $DATA_DIR/"
         echo ""
         echo "Note: This is synthetic data for testing the pipeline."
-        echo "For real training, you need MinCatFlow-format data."
+        echo "For real training, you need CatGen-format data."
         ;;
 
     oc20)
         echo "Downloading OC20 IS2RE data..."
         echo ""
         echo "WARNING: This downloads standard OC20 LMDB format."
-        echo "         It requires conversion to MinCatFlow format."
+        echo "         It requires conversion to CatGen format."
         echo ""
 
         OC20_DIR="$DATA_DIR/oc20_raw"
@@ -93,7 +93,7 @@ case "$OPTION" in
         echo "Done! OC20 IS2RE data downloaded to: $OC20_DIR/"
         echo ""
         echo "NEXT STEPS:"
-        echo "1. Convert to MinCatFlow format using:"
+        echo "1. Convert to CatGen format using:"
         echo "   bash scripts/data/convert_oc20.sh train"
         echo "   bash scripts/data/convert_oc20.sh val_id"
         echo ""
@@ -102,8 +102,8 @@ case "$OPTION" in
         ;;
 
     info)
-        echo "MinCatFlow LMDB Data Format"
-        echo "==========================="
+        echo "CatGen LMDB Data Format"
+        echo "======================="
         echo ""
         echo "Each sample in the LMDB contains:"
         echo ""
@@ -136,7 +136,7 @@ case "$OPTION" in
         echo ""
         echo "Key Differences from Standard OC20 LMDB:"
         echo "  - OC20 stores full catalyst+adsorbate structures"
-        echo "  - MinCatFlow decomposes into primitive slab + supercell matrix"
+        echo "  - CatGen decomposes into primitive slab + supercell matrix"
         echo "  - This decomposition enables flow matching on primitive cells"
         ;;
 

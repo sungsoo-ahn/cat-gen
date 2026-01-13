@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Convert OC20 IS2RE LMDB directly to MinCatFlow LMDB format.
+"""Convert OC20 IS2RE LMDB directly to CatGen LMDB format.
 
 Usage:
-    uv run python src/scripts/oc20_to_mincatflow.py \
+    uv run python src/scripts/oc20_to_catgen.py \
         --lmdb-path dataset/oc20_raw/is2re/all/train/data.lmdb \
         --mapping-path resources/oc20_data_mapping.pkl \
         --adsorbates-path resources/adsorbates.pkl \
@@ -176,7 +176,7 @@ def extract_from_lmdb(lmdb_path: str, index: int, verbose: bool = False) -> tupl
         db.close()
 
 
-def process_to_mincatflow(
+def process_to_catgen(
     data: dict,
     n_slab: int,
     n_vac: int,
@@ -184,7 +184,7 @@ def process_to_mincatflow(
     rmsd_tolerance: float = 1e-4,
     verbose: bool = False,
 ) -> tuple[dict | None, dict]:
-    """Convert extracted data to MinCatFlow format with primitive slab.
+    """Convert extracted data to CatGen format with primitive slab.
 
     Args:
         data: Extracted OC20 data
@@ -196,7 +196,7 @@ def process_to_mincatflow(
 
     Returns:
         Tuple of (result_data, diagnostics)
-        - result_data: MinCatFlow format dict or None if failed
+        - result_data: CatGen format dict or None if failed
         - diagnostics: Dict with detailed failure information
     """
     diagnostics = {
@@ -681,14 +681,14 @@ def process_single(index: int) -> dict:
 
     n_slab, n_vac = layers
 
-    # Convert to MinCatFlow format with detailed diagnostics
+    # Convert to CatGen format with detailed diagnostics
     rmsd_tol = _rmsd_tolerance if _rmsd_tolerance is not None else 1e-4
-    mincatflow_data, diagnostics = process_to_mincatflow(
+    catgen_data, diagnostics = process_to_catgen(
         data, n_slab, n_vac, ref_ads_pos_canonical, rmsd_tolerance=rmsd_tol
     )
     result['diagnostics'] = diagnostics
 
-    if mincatflow_data is None:
+    if catgen_data is None:
         # Use specific error from diagnostics if available
         if diagnostics.get('error'):
             result['status'] = f"conversion_failed:{diagnostics['error']}"
@@ -697,12 +697,12 @@ def process_single(index: int) -> dict:
         return result
 
     result['status'] = 'success'
-    result['data'] = mincatflow_data
+    result['data'] = catgen_data
     return result
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert OC20 to MinCatFlow LMDB")
+    parser = argparse.ArgumentParser(description="Convert OC20 to CatGen LMDB")
     parser.add_argument("--lmdb-path", type=str, required=True, help="OC20 IS2RE LMDB path")
     parser.add_argument("--mapping-path", type=str, required=True, help="oc20_data_mapping.pkl path")
     parser.add_argument("--adsorbates-path", type=str, default="resources/adsorbates.pkl",
