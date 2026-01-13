@@ -81,11 +81,10 @@ model:
   # Flow process arguments
   flow_process_args:
     num_sampling_steps: 50
-    coordinate_augmentation: true
     synchronize_timesteps: false
     compile_model: false
     timestep_distribution: "exponential"  # "uniform" or "exponential" - exponential samples more near t=0
-    use_time_reweighting: true  # Apply SNR-based time weighting to losses
+    use_time_reweighting: false  # Disabled based on overfitting experiments
 
   # Use optimized kernels
   use_kernels: false
@@ -114,19 +113,19 @@ training:
   scaling_factor_loss_weight: 1.0
 
   # Optimizer
-  lr: 0.0001
-  weight_decay: 0.01
+  lr: 0.0003
+  weight_decay: 0.001
   adam_beta1: 0.9
   adam_beta2: 0.999
 
-  # EMA (Exponential Moving Average) for improved generation quality
-  use_ema: true
+  # EMA (Exponential Moving Average) - disabled based on overfitting experiments
+  use_ema: false
   ema_decay: 0.9999
 
   # Learning rate scheduler
   scheduler:
     type: "cosine_warmup"  # "none", "cosine_warmup", "linear_warmup"
-    warmup_steps: 10000  # Number of warmup steps (or use warmup_epochs)
+    warmup_steps: 50  # Number of warmup steps (or use warmup_epochs)
     warmup_epochs: null  # Alternative: warmup as fraction of epochs (overrides warmup_steps if set)
     min_lr_ratio: 0.01  # Minimum LR as ratio of initial LR (for cosine annealing)
 

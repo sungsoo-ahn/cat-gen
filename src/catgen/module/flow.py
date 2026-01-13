@@ -12,7 +12,7 @@ from src.catgen.models.layers import (
     TransformerBackbone,
     OutputProjection,
 )
-from src.catgen.models.utils import LinearNoBias, center_random_augmentation, default
+from src.catgen.models.utils import LinearNoBias, default
 from src.catgen.scripts.refine_sc_mat import refine_sc_mat
 from src.catgen.constants import (
     FLOW_EPSILON,
@@ -150,7 +150,6 @@ class AtomFlowMatching(Module):
         flow_model_args: dict,
         prior_sampler: CatPriorSampler,
         num_sampling_steps: int = 16,
-        coordinate_augmentation: bool = True,
         synchronize_timesteps: bool = False,
         compile_model: bool = False,
         timestep_distribution: str = "uniform",
@@ -171,7 +170,6 @@ class AtomFlowMatching(Module):
 
         # Parameters
         self.num_sampling_steps = num_sampling_steps
-        self.coordinate_augmentation = coordinate_augmentation
         self.synchronize_timesteps = synchronize_timesteps
         self.timestep_distribution = timestep_distribution
         self.use_time_reweighting = kwargs.get("use_time_reweighting", False)
