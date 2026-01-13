@@ -1,24 +1,29 @@
-# Overfitting test configuration
-# Uses toy dataset for fast loading
-# Purpose: Verify model can memorize a small dataset before scaling up
+# Optimizer comparison - MuOn optimizer
+# Scale3 model: hidden_dim=768, depth=24, heads=12
+# Uses toy dataset for fast iteration
 #
-# To create the toy dataset:
-#   uv run python src/scripts/create_toy_dataset.py
+# MuOn (Momentum Orthogonalized) optimizer:
+# - Uses Newton-Schulz orthogonalization for 2D weight matrices
+# - Typically requires 10-100x higher learning rate than AdamW
+# - Falls back to AdamW for biases, norms, and embeddings
+#
+# Key tuning parameter:
+# - lr: Main learning rate for MuOn (2D weights) - try 0.01, 0.02, 0.05
 
-output_dir: "data/catgen/overfit"
+output_dir: "data/catgen/optimizer/muon"
 
 experiment:
-  name: "overfit_test"
+  name: "optimizer_muon"
   version: "1.0.0"
   seed: 42
   deterministic: true
 
-code_version: "overfit"
+code_version: "optimizer_comparison"
 
 # Data configuration - uses toy dataset for fast loading
 data:
   train_lmdb_path: "dataset/toy/dataset.lmdb"
-  val_lmdb_path: "dataset/toy/dataset.lmdb"  # Use train data for validation
+  val_lmdb_path: "dataset/toy/dataset.lmdb"
   test_lmdb_path: null
   batch_size:
     train: 64
@@ -30,9 +35,9 @@ data:
     test: 4
   preload_to_ram: true
   use_pyg: false
-  train_shuffle: false  # Always see same samples
+  train_shuffle: false
 
-# Model architecture - same as default
+# Model architecture - Scale3: hidden_dim=768, depth=24, heads=12
 model:
   hidden_dim: 768
 
@@ -42,10 +47,9 @@ model:
     positional_encoding: false
     attention_impl: "flash"
     activation_checkpointing: false
-    # Output initialization for lower initial loss
-    coord_output_scale: 1.0  # Reduced from 3.0 to bound initial predictions tighter
-    output_init: "zero"  # Zero-init output layers so predictions start at 0
-    output_init_scale: 0.01  # Only used if output_init: "small"
+    coord_output_scale: 1.0
+    output_init: "zero"
+    output_init_scale: 0.01
 
   prior_sampler_args:
     coord_std: 1.0
@@ -85,9 +89,10 @@ model:
 
   use_kernels: false
 
-# Training configuration - same as default but more epochs
+# Training configuration - MuOn optimizer
 training:
-  max_epochs: 10000  # More epochs for overfitting
+  optimizer: "muon"
+  max_epochs: 10000
   accelerator: "gpu"
   devices: 1
   strategy: "auto"
@@ -97,43 +102,46 @@ training:
   gradient_clip_val: 10.0
   gradient_clip_algorithm: "norm"
   val_check_interval: 1
-  check_val_every_n_epoch: 1000  # Validate periodically
+  check_val_every_n_epoch: 500
 
-  limit_train_batches: null  # Use all batches
+  limit_train_batches: null
   limit_val_batches: null
 
   train_multiplicity: 1
   loss_type: "l2"
-  loss_space: "normalized"  # Use normalized space for lower initial loss
+  loss_space: "normalized"
   prim_slab_coord_loss_weight: 1.0
   ads_coord_loss_weight: 1.0
   prim_virtual_loss_weight: 1.0
   supercell_virtual_loss_weight: 1.0
   scaling_factor_loss_weight: 1.0
 
-  lr: 0.0001
+  # MuOn hyperparameters
+  lr: 0.02                    # MuOn LR for 2D weights (try 0.01, 0.02, 0.05)
+  muon_momentum: 0.95         # Muon momentum (default, usually good)
+  adamw_lr: 0.001             # AdamW LR for biases/norms/embeddings
   weight_decay: 0.01
   adam_beta1: 0.9
-  adam_beta2: 0.999
+  adam_beta2: 0.95            # Muon package default
 
   use_ema: true
   ema_decay: 0.9999
 
   scheduler:
     type: "cosine_warmup"
-    warmup_steps: 100  # Shorter warmup for overfitting
+    warmup_steps: 100
     warmup_epochs: null
     min_lr_ratio: 0.01
 
   checkpoint:
-    save_top_k: 3
+    save_top_k: 1
     save_last: true
     monitor: "train/loss/total"
     mode: "min"
 
 # Validation configuration
 validation:
-  sample_every_n_epochs: 1
+  sample_every_n_epochs: 500
   flow_samples: 1
   sampling_steps: 50
   sampling_center_coords: false
@@ -147,9 +155,9 @@ validation:
     ltol: 0.3
     stol: 0.5
     angle_tol: 10.0
-  log_structures_to_wandb: true
+  log_structures_to_wandb: false
   max_structures_to_log: 5
-  compute_train_match_rate: true
+  compute_train_match_rate: false
   max_train_cache_size: 1024
 
 # Prediction configuration
@@ -165,7 +173,7 @@ wandb:
   project: "CatGen"
   entity: null
   mode: "online"
-  tags: ["overfit"]
-  notes: "Overfitting test with scale3 model (hidden_dim=768, depth=24, heads=12)"
-  watch_gradients: true
+  tags: ["optimizer", "muon", "scale3"]
+  notes: "Optimizer comparison - MuOn (lr=0.02, scale3 model)"
+  watch_gradients: false
   watch_freq: 100
