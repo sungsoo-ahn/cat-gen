@@ -46,7 +46,7 @@ model:
     atom_decoder_heads: 4
     attention_impl: "flash"  # "pytorch", "xformers", "manual", "flash" (uses scaled_dot_product_attention)
     activation_checkpointing: false
-    dng: true  # Dynamic Nuclear Graph mode
+    dng: false  # Structure prediction mode (no element generation)
 
   # Prior sampler arguments (computed from dataset statistics)
   prior_sampler_args:
@@ -107,11 +107,12 @@ training:
   num_sanity_val_steps: 2
   gradient_clip_val: 10.0
   gradient_clip_algorithm: "norm"
-  val_check_interval: 1.0
+  check_val_every_n_epoch: 1  # Validate once per epoch
 
   # Loss configuration
   train_multiplicity: 1
   loss_type: "l2"  # "l1" or "l2"
+  loss_space: "normalized"  # "raw" (Angstrom) or "normalized" (unit-variance)
   prim_slab_coord_loss_weight: 1.0
   ads_coord_loss_weight: 1.0
   prim_virtual_loss_weight: 1.0

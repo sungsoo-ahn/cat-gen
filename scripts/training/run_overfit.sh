@@ -11,12 +11,18 @@
 
 set -e
 
+# Get project root (directory containing this script's parent)
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export PYTHONPATH="$PROJECT_ROOT"
+
+cd "$PROJECT_ROOT"
+
 echo "=== Overfitting Test ==="
 echo "Training on 8 samples for 500 epochs"
 echo "Expected: training loss should decrease to near-zero"
 echo ""
 
-uv run python src/scripts/train.py configs/default/overfit.yaml --overwrite
+uv run python src/scripts/train.py configs/default/overfit.yaml --overwrite "$@"
 
 echo ""
 echo "=== Test Complete ==="

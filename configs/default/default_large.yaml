@@ -1,46 +1,48 @@
-# 100-epoch training config with 10K OC20 subset - Structure Prediction mode
-# Reimplementation with dng=false (predicts coordinates only)
+# Large model configuration - 2x embeddings and 2x depth
+# Based on default.yaml with increased model capacity
 
-output_dir: "data/catgen/train_10k_struct"
+output_dir: "data/catgen/default_large"
 
 experiment:
-  name: "mincatflow_10k_struct"
+  name: "mincatflow_catgen_large"
   version: "1.0.0"
   seed: 42
   deterministic: true
 
-code_version: "catgen"
+code_version: "catgen_large"
 
+# Data configuration
 data:
   train_lmdb_path: "dataset/train/dataset.lmdb"
   val_lmdb_path: "dataset/val_id/dataset.lmdb"
   test_lmdb_path: null
   batch_size:
-    train: 8
-    val: 8
-    test: 8
+    train: 128  # Reduced from 512 due to larger model size
+    val: 128
+    test: 128
   num_workers:
-    train: 4
-    val: 4
-    test: 4
+    train: 16
+    val: 16
+    test: 16
   preload_to_ram: true
   use_pyg: false
 
+# Model architecture - 2x embeddings and 2x depth
 model:
-  atom_s: 768
-  token_s: 768
+  atom_s: 512  # 2x from 256
+  token_s: 512  # 2x from 256
 
   flow_model_args:
-    atom_encoder_depth: 6
-    atom_encoder_heads: 12
+    atom_encoder_depth: 4  # 2x from 2
+    atom_encoder_heads: 8  # 2x from 4
     atom_encoder_positional_encoding: false
-    token_transformer_depth: 12
-    token_transformer_heads: 12
-    atom_decoder_depth: 6
-    atom_decoder_heads: 12
-    attention_impl: "pytorch"
+    token_transformer_depth: 8  # 2x from 4
+    token_transformer_heads: 8  # 2x from 4
+    atom_decoder_depth: 4  # 2x from 2
+    atom_decoder_heads: 8  # 2x from 4
+    attention_impl: "flash"
     activation_checkpointing: false
-    dng: false  # Structure Prediction mode - uses given elements
+    dng: false  # Structure prediction mode
 
   prior_sampler_args:
     coord_std: 1.0
@@ -75,40 +77,45 @@ model:
     coordinate_augmentation: true
     synchronize_timesteps: false
     compile_model: false
+    timestep_distribution: "exponential"
+    use_time_reweighting: true
 
   use_kernels: false
 
+# Training configuration
 training:
-  max_epochs: 100
+  max_epochs: 20
   accelerator: "gpu"
   devices: 1
   strategy: "auto"
-  precision: 32
+  precision: "bf16-mixed"
   accumulate_grad_batches: 1
-  num_sanity_val_steps: 0
+  num_sanity_val_steps: 2
   gradient_clip_val: 10.0
   gradient_clip_algorithm: "norm"
-  check_val_every_n_epoch: 1
-  val_check_interval: 1.0
+  check_val_every_n_epoch: 1  # Validate once per epoch
 
   train_multiplicity: 1
   loss_type: "l2"
+  loss_space: "normalized"
   prim_slab_coord_loss_weight: 1.0
-  ads_coord_loss_weight: 0.1
+  ads_coord_loss_weight: 1.0
   prim_virtual_loss_weight: 1.0
   supercell_virtual_loss_weight: 1.0
   scaling_factor_loss_weight: 1.0
-  prim_slab_element_loss_weight: 0.0  # Disabled for structure prediction
+  prim_slab_element_loss_weight: 5.0
 
   lr: 0.0001
-  weight_decay: 0.0
+  weight_decay: 0.01
   adam_beta1: 0.9
   adam_beta2: 0.999
 
-  # Learning rate scheduler
+  use_ema: true
+  ema_decay: 0.9999
+
   scheduler:
-    type: "cosine_warmup"  # "none", "cosine_warmup", "linear_warmup"
-    warmup_steps: 500  # Fewer warmup steps for 10k dataset
+    type: "cosine_warmup"
+    warmup_steps: 10000
     warmup_epochs: null
     min_lr_ratio: 0.01
 
@@ -118,14 +125,15 @@ training:
     monitor: "val/loss/total"
     mode: "min"
 
+# Validation configuration
 validation:
-  sample_every_n_epochs: 10
+  sample_every_n_epochs: 2
   flow_samples: 1
   sampling_steps: 50
   sampling_center_coords: false
   timeout: 120
   num_workers: 4
-  n_prim_slab_atoms_histogram_path: null
+  n_prim_slab_atoms_histogram_path: "primitive_atom_distribution.json"
   max_n_prim_slab_atoms: null
   compute_adsorption: false
   adsorption_device: "cuda"
@@ -135,22 +143,23 @@ validation:
     ltol: 0.3
     stol: 0.5
     angle_tol: 10.0
-  # W&B structure visualization
   log_structures_to_wandb: true
   max_structures_to_log: 5
 
+# Prediction configuration
 prediction:
   num_samples: 1
   sampling_steps: 50
   sampling_center_coords: false
   refine_final: false
 
+# WandB configuration
 wandb:
   enabled: true
   project: "CatGen"
   entity: null
   mode: "online"
-  tags: ["10k", "struct", "catgen", "100epoch"]
-  notes: "100-epoch training on 10K OC20 subset with structure prediction mode (catgen)"
-  watch_gradients: false
+  tags: ["large"]
+  notes: "Large model - 2x embeddings (512) and 2x depth (4+8+4)"
+  watch_gradients: true
   watch_freq: 100
