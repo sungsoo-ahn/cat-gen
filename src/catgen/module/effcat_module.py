@@ -44,6 +44,80 @@ from src.catgen.module.flow import AtomFlowMatching
 from src.catgen.scripts.assemble import assemble
 
 
+class CombinedMuonAdamW(torch.optim.Optimizer):
+    """Combined optimizer that wraps Muon and AdamW for Lightning compatibility.
+
+    Lightning requires a single optimizer for automatic optimization.
+    This wrapper combines Muon (for 2D weight matrices) and AdamW (for other params)
+    into a single optimizer interface.
+    """
+
+    def __init__(self, muon_optimizer, adamw_optimizer):
+        """Initialize combined optimizer.
+
+        Parameters
+        ----------
+        muon_optimizer : Muon
+            Muon optimizer for 2D weight matrices.
+        adamw_optimizer : AdamW
+            AdamW optimizer for biases, norms, embeddings.
+        """
+        self.muon = muon_optimizer
+        self.adamw = adamw_optimizer
+
+        # Combine param_groups from both optimizers
+        self.param_groups = self.muon.param_groups + self.adamw.param_groups
+
+        # Track defaults (use AdamW defaults as base)
+        self.defaults = self.adamw.defaults.copy()
+
+        # State dict combines both
+        self._state = {}
+
+    @property
+    def state(self):
+        """Combined state from both optimizers."""
+        combined = {}
+        combined.update(self.muon.state)
+        combined.update(self.adamw.state)
+        return combined
+
+    @state.setter
+    def state(self, value):
+        """Set state (for checkpoint loading)."""
+        self._state = value
+
+    def zero_grad(self, set_to_none: bool = True):
+        """Zero gradients for both optimizers."""
+        self.muon.zero_grad(set_to_none=set_to_none)
+        self.adamw.zero_grad(set_to_none=set_to_none)
+
+    def step(self, closure=None):
+        """Step both optimizers."""
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        self.muon.step()
+        self.adamw.step()
+
+        return loss
+
+    def state_dict(self):
+        """Return combined state dict."""
+        return {
+            "muon": self.muon.state_dict(),
+            "adamw": self.adamw.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict):
+        """Load combined state dict."""
+        if "muon" in state_dict:
+            self.muon.load_state_dict(state_dict["muon"])
+        if "adamw" in state_dict:
+            self.adamw.load_state_dict(state_dict["adamw"])
+
+
 class EffCatModule(LightningModule):
     def __init__(
         self,
@@ -1501,21 +1575,28 @@ class EffCatModule(LightningModule):
         """Configure optimizer and learning rate scheduler.
 
         Supports:
-        - AdamW optimizer with configurable betas
+        - AdamW optimizer with configurable betas (default)
+        - Muon optimizer for 2D weight matrices + AdamW for others (combined wrapper)
         - Cosine warmup scheduler (linear warmup + cosine annealing)
         - Linear warmup scheduler (linear warmup + linear decay)
         - No scheduler (constant learning rate)
         """
-        # Create optimizer
-        optimizer = torch.optim.AdamW(
-            params=self.parameters(),
-            lr=self.training_args["lr"],
-            weight_decay=self.training_args.get("weight_decay", 0.0),
-            betas=(
-                self.training_args.get("adam_beta1", 0.9),
-                self.training_args.get("adam_beta2", 0.999),
-            ),
-        )
+        optimizer_type = self.training_args.get("optimizer", "adamw").lower()
+
+        if optimizer_type == "muon":
+            # Returns CombinedMuonAdamW wrapper (single optimizer for Lightning)
+            optimizer = self._configure_muon_optimizer()
+        else:
+            # Default to AdamW
+            optimizer = torch.optim.AdamW(
+                params=self.parameters(),
+                lr=self.training_args["lr"],
+                weight_decay=self.training_args.get("weight_decay", 0.0),
+                betas=(
+                    self.training_args.get("adam_beta1", 0.9),
+                    self.training_args.get("adam_beta2", 0.999),
+                ),
+            )
 
         # Check if scheduler is configured
         scheduler_config = self.training_args.get("scheduler", {})
@@ -1544,7 +1625,7 @@ class EffCatModule(LightningModule):
         # Ensure warmup doesn't exceed total steps
         warmup_steps = min(warmup_steps, total_steps - 1)
 
-        # Create scheduler based on type
+        # Create scheduler
         if scheduler_type == "cosine_warmup":
             min_lr_ratio = scheduler_config.get("min_lr_ratio", 0.01)
             scheduler = get_cosine_schedule_with_warmup(
@@ -1579,6 +1660,95 @@ class EffCatModule(LightningModule):
                 "frequency": 1,
             },
         }
+
+    def _configure_muon_optimizer(self):
+        """Configure Muon optimizer for 2D weight matrices with Adam for others.
+
+        Muon is designed for 2D weight matrices in transformers.
+        Other parameters (biases, LayerNorm, embeddings, 1D params) use Adam.
+
+        Uses SingleDeviceMuonWithAuxAdam for single-GPU training.
+
+        Returns
+        -------
+        optimizer
+            Combined optimizer with Muon for 2D weights and Adam for others.
+        """
+        from muon import SingleDeviceMuonWithAuxAdam
+
+        # Separate parameters into 2D weight matrices and others
+        muon_params = []
+        adam_params = []
+
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            # Check if this is a 2D weight matrix (not bias, not LayerNorm, not embedding)
+            is_2d_weight = (
+                param.ndim == 2
+                and "bias" not in name.lower()
+                and "norm" not in name.lower()
+                and "embed" not in name.lower()
+                and "layernorm" not in name.lower()
+            )
+
+            if is_2d_weight:
+                muon_params.append(param)
+            else:
+                adam_params.append(param)
+
+        # Log parameter counts
+        muon_param_count = sum(p.numel() for p in muon_params)
+        adam_param_count = sum(p.numel() for p in adam_params)
+        total_params = muon_param_count + adam_param_count
+
+        rank_zero_info("| Muon optimizer configuration:")
+        rank_zero_info(
+            f"|   2D weight params (Muon): {muon_param_count:,} "
+            f"({100*muon_param_count/total_params:.1f}%)"
+        )
+        rank_zero_info(
+            f"|   Other params (Adam): {adam_param_count:,} "
+            f"({100*adam_param_count/total_params:.1f}%)"
+        )
+
+        # Get Muon-specific hyperparameters
+        muon_lr = self.training_args["lr"]
+        muon_momentum = self.training_args.get("muon_momentum", 0.95)
+
+        # Adam hyperparameters (use 10x lower LR by default for non-Muon params)
+        adam_lr = self.training_args.get("adamw_lr", muon_lr * 0.1)
+        weight_decay = self.training_args.get("weight_decay", 0.0)
+
+        rank_zero_info(f"|   Muon LR: {muon_lr}, momentum: {muon_momentum}")
+        rank_zero_info(f"|   Adam LR: {adam_lr}, weight_decay: {weight_decay}")
+
+        # Create param groups for SingleDeviceMuonWithAuxAdam
+        # Muon group: 2D weight matrices
+        muon_group = {
+            "params": muon_params,
+            "use_muon": True,
+            "lr": muon_lr,
+            "momentum": muon_momentum,
+            "weight_decay": weight_decay,
+        }
+
+        # Adam group: biases, norms, embeddings
+        adam_group = {
+            "params": adam_params,
+            "use_muon": False,
+            "lr": adam_lr,
+            "betas": (
+                self.training_args.get("adam_beta1", 0.9),
+                self.training_args.get("adam_beta2", 0.95),  # Muon package uses 0.95 default
+            ),
+            "eps": 1e-10,
+            "weight_decay": weight_decay,
+        }
+
+        # Create combined optimizer for single-GPU training
+        return SingleDeviceMuonWithAuxAdam([muon_group, adam_group])
 
     def configure_callbacks(self) -> list[Callback]:
         """Configure model callbacks.
