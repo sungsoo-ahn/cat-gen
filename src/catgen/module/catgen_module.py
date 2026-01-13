@@ -30,8 +30,6 @@ from src.catgen.module.lr_schedulers import (
 from src.catgen.models.loss.validation import (
     find_best_match_rmsd_prim,
     find_best_match_rmsd_slab,
-    find_train_match_prim,
-    find_train_match_slab,
     compute_structural_validity_single,
     compute_prim_structural_validity_single,
     compute_comprehensive_validity_single,
@@ -158,13 +156,6 @@ class CatGen(LightningModule):
         self.val_crystal_validity = MeanMetric(sync_on_compute=False)
         self.validation_step_outputs = []
 
-        # Training match rate metrics (compare generated samples against training set)
-        # This helps detect if model is memorizing training data
-        self.val_train_prim_match_rate = MeanMetric(sync_on_compute=False)
-        self.val_train_slab_match_rate = MeanMetric(sync_on_compute=False)
-        self._train_sample_cache = []  # Cache training samples for match rate comparison
-        self._max_train_cache_size = self.validation_args.get("max_train_cache_size", 500)
-        
         # UMA calculator for adsorption energy (lazy initialization)
         self._uma_calculator = None
 
@@ -422,23 +413,6 @@ class CatGen(LightningModule):
         # Time
         step_time = time.time() - step_start_time
         self.log("train/throughput/samples_per_second", batch_size / step_time)
-
-        # Cache training samples for train match rate comparison
-        if len(self._train_sample_cache) < self._max_train_cache_size:
-            # Cache ground truth structures for comparison during validation
-            for i in range(min(batch_size, self._max_train_cache_size - len(self._train_sample_cache))):
-                # Store on CPU to save GPU memory
-                self._train_sample_cache.append({
-                    "prim_slab_coords": batch["prim_slab_cart_coords"][i].detach().cpu().numpy(),
-                    "ads_coords": batch["ads_cart_coords"][i].detach().cpu().numpy(),
-                    "lattice": batch["lattice"][i].detach().cpu().numpy(),
-                    "supercell_matrix": batch["supercell_matrix"][i].detach().cpu().numpy(),
-                    "scaling_factor": float(batch["scaling_factor"][i].detach().cpu()),
-                    "prim_slab_atom_types": batch["ref_prim_slab_element"][i].detach().cpu().numpy(),
-                    "ads_atom_types": batch["ref_ads_element"][i].detach().cpu().numpy(),
-                    "prim_slab_atom_mask": batch["prim_slab_atom_pad_mask"][i].detach().cpu().numpy().astype(bool),
-                    "ads_atom_mask": batch["ads_atom_pad_mask"][i].detach().cpu().numpy().astype(bool),
-                })
 
         return total_loss
 
@@ -1048,75 +1022,8 @@ class CatGen(LightningModule):
                 else:
                     self.val_slab_match_rate.update(0.0)
 
-                # Compute training match rate (compare generated samples against training set)
-                # This helps detect if the model is memorizing training data
-                compute_train_match = self.validation_args.get("compute_train_match_rate", True)
-                if compute_train_match and len(self._train_sample_cache) > 0:
-                    rank_zero_info(f"| Computing train match rate against {len(self._train_sample_cache)} cached training samples...")
-
-                    # Prepare tasks for training match rate (prim only for efficiency)
-                    train_match_prim_tasks = []
-                    for batch_output in valid_outputs:
-                        sampled_prim_slab_coords = (
-                            rearrange(
-                                batch_output["sampled_prim_slab_coords"],
-                                "(b m) n c -> b m n c",
-                                m=n_samples,
-                            )
-                            .cpu()
-                            .numpy()
-                        )
-                        sampled_lattices = (
-                            rearrange(
-                                batch_output["sampled_lattices"],
-                                "(b m) c -> b m c",
-                                m=n_samples,
-                            )
-                            .cpu()
-                            .numpy()
-                        )
-                        prim_slab_atom_types = batch_output["prim_slab_atom_types"].cpu().numpy()
-                        prim_slab_atom_mask = batch_output["prim_slab_atom_mask"].cpu().numpy().astype(bool)
-
-                        batch_size = sampled_prim_slab_coords.shape[0]
-                        for i in range(batch_size):
-                            # For each sample within the generated batch
-                            for sample_idx in range(n_samples):
-                                train_match_prim_tasks.append(
-                                    (
-                                        sampled_prim_slab_coords[i, sample_idx],
-                                        sampled_lattices[i, sample_idx],
-                                        prim_slab_atom_types[i],
-                                        prim_slab_atom_mask[i],
-                                        self._train_sample_cache,
-                                        self.matcher_kwargs,
-                                    )
-                                )
-
-                    # Execute training match tasks in parallel
-                    train_match_prim_results = run_parallel_tasks(
-                        tasks=train_match_prim_tasks,
-                        task_fn=find_train_match_prim,
-                        num_workers=num_workers,
-                        timeout_seconds=timeout_seconds * 2,  # Allow more time for many comparisons
-                        task_name="Train match rate (prim)",
-                        default_result=False,
-                    )
-
-                    # Compute train match rate per input (at least one sample matches training)
-                    # Results are flattened: [batch1_sample1, batch1_sample2, ..., batch2_sample1, ...]
-                    total_items = len(train_match_prim_results) // n_samples
-                    for item_idx in range(total_items):
-                        item_results = train_match_prim_results[item_idx * n_samples : (item_idx + 1) * n_samples]
-                        if any(item_results):
-                            self.val_train_prim_match_rate.update(1.0)
-                        else:
-                            self.val_train_prim_match_rate.update(0.0)
-
-                    rank_zero_info(f"| Train prim match rate: {self.val_train_prim_match_rate.compute():.4f}")
-
-                # Log high-RMSD structures for debugging (top 3 worst by prim RMSD)
-                self._log_high_rmsd_structures_to_wandb(
+            # Log high-RMSD structures for debugging (top 3 worst by prim RMSD)
+            self._log_high_rmsd_structures_to_wandb(
                     valid_outputs=valid_outputs,
                     prim_rmsd_results_per_item=prim_rmsd_results_per_item,
                     n_samples=n_samples,
@@ -1283,26 +1190,16 @@ class CatGen(LightningModule):
             else:
                 self.log("val/rmsd/slab", float("nan"), rank_zero_only=True)
 
-            # Training match rate (compare generated samples against training set)
-            if self.val_train_prim_match_rate.update_count > 0:
-                self.log(
-                    "val/match_rate/train_primitive",
-                    self.val_train_prim_match_rate.compute(),
-                    rank_zero_only=True,
-                )
-            else:
-                self.log("val/match_rate/train_primitive", float("nan"), rank_zero_only=True)
-
             # Log prim structural validity (always computed, regardless of compute_adsorption)
             self.log(
-                "val/validity/structural_primitive",
+                "val/validity/prim_structural",
                 self.val_prim_structural_validity.compute() if self.val_prim_structural_validity.update_count > 0 else float("nan"),
                 rank_zero_only=True,
             )
 
             # Log slab structural validity (always computed, regardless of compute_adsorption)
             self.log(
-                "val/validity/structural",
+                "val/validity/slab_structural",
                 self.val_structural_validity.compute() if self.val_structural_validity.update_count > 0 else float("nan"),
                 rank_zero_only=True,
             )
@@ -1347,8 +1244,6 @@ class CatGen(LightningModule):
             self.val_prim_rmsd.reset()
             self.val_slab_match_rate.reset()
             self.val_slab_rmsd.reset()
-            self.val_train_prim_match_rate.reset()
-            self.val_train_slab_match_rate.reset()
             self.val_adsorption_energy.reset()
             self.val_structural_validity.reset()
             self.val_prim_structural_validity.reset()

@@ -1,43 +1,38 @@
-# Optimizer comparison - MuOn optimizer
-# Scale3 model: hidden_dim=768, depth=24, heads=12
-# Uses toy dataset for fast iteration
+# Small overfitting test configuration
+# Uses tiny 32-sample toy dataset for quick testing
+# Purpose: Quick verification that code changes work correctly
 #
-# MuOn (Momentum Orthogonalized) optimizer:
-# - Uses Newton-Schulz orthogonalization for 2D weight matrices
-# - Typically requires 10-100x higher learning rate than AdamW
-# - Falls back to AdamW for biases, norms, and embeddings
-#
-# Key tuning parameter:
-# - lr: Main learning rate for MuOn (2D weights) - try 0.01, 0.02, 0.05
+# To create the toy dataset:
+#   uv run python src/scripts/create_toy_dataset.py --n-samples 32 --output dataset/toy_small
 
-output_dir: "data/catgen/optimizer/muon"
+output_dir: "data/catgen/overfit_small"
 
 experiment:
-  name: "optimizer_muon"
+  name: "overfit_small_test"
   version: "1.0.0"
   seed: 42
   deterministic: true
 
-code_version: "optimizer_comparison"
+code_version: "overfit_small"
 
-# Data configuration - uses toy dataset for fast loading
+# Data configuration - uses tiny 32-sample toy dataset
 data:
-  train_lmdb_path: "dataset/toy/dataset.lmdb"
-  val_lmdb_path: "dataset/toy/dataset.lmdb"
+  train_lmdb_path: "dataset/toy_small/dataset.lmdb"
+  val_lmdb_path: "dataset/toy_small/dataset.lmdb"  # Use train data for validation
   test_lmdb_path: null
   batch_size:
-    train: 64
-    val: 64
-    test: 64
+    train: 32
+    val: 32
+    test: 32
   num_workers:
     train: 4
     val: 4
     test: 4
   preload_to_ram: true
   use_pyg: false
-  train_shuffle: false
+  train_shuffle: false  # Always see same samples
 
-# Model architecture - Scale3: hidden_dim=768, depth=24, heads=12
+# Model architecture - same as default
 model:
   hidden_dim: 768
 
@@ -47,9 +42,6 @@ model:
     positional_encoding: false
     attention_impl: "flash"
     activation_checkpointing: false
-    coord_output_scale: 1.0
-    output_init: "zero"
-    output_init_scale: 0.01
 
   prior_sampler_args:
     coord_std: 1.0
@@ -89,10 +81,10 @@ model:
 
   use_kernels: false
 
-# Training configuration - MuOn optimizer
+# Training configuration - quick test with fewer epochs
 training:
-  optimizer: "muon"
-  max_epochs: 10000
+  optimizer: "adamw"  # Default optimizer
+  max_epochs: 100  # Quick test
   accelerator: "gpu"
   devices: 1
   strategy: "auto"
@@ -101,47 +93,45 @@ training:
   num_sanity_val_steps: 0
   gradient_clip_val: 10.0
   gradient_clip_algorithm: "norm"
-  val_check_interval: 1
-  check_val_every_n_epoch: 500
+  val_check_interval: null  # Don't validate within epochs
+  check_val_every_n_epoch: 50  # Validate every 50 epochs
+  log_every_n_steps: 1  # Log training metrics every step
 
-  limit_train_batches: null
+  limit_train_batches: null  # Use all batches
   limit_val_batches: null
 
   train_multiplicity: 1
   loss_type: "l2"
-  loss_space: "normalized"
+  loss_space: "normalized"  # Use normalized space for lower initial loss
   prim_slab_coord_loss_weight: 1.0
   ads_coord_loss_weight: 1.0
   prim_virtual_loss_weight: 1.0
   supercell_virtual_loss_weight: 1.0
   scaling_factor_loss_weight: 1.0
 
-  # MuOn hyperparameters
-  lr: 0.02                    # MuOn LR for 2D weights (try 0.01, 0.02, 0.05)
-  muon_momentum: 0.95         # Muon momentum (default, usually good)
-  adamw_lr: 0.001             # AdamW LR for biases/norms/embeddings
+  lr: 0.0001
   weight_decay: 0.01
   adam_beta1: 0.9
-  adam_beta2: 0.95            # Muon package default
+  adam_beta2: 0.999
 
   use_ema: true
   ema_decay: 0.9999
 
   scheduler:
     type: "cosine_warmup"
-    warmup_steps: 100
+    warmup_steps: 100  # Shorter warmup for overfitting
     warmup_epochs: null
     min_lr_ratio: 0.01
 
   checkpoint:
-    save_top_k: 1
+    save_top_k: 3
     save_last: true
     monitor: "train/loss/total"
     mode: "min"
 
 # Validation configuration
 validation:
-  sample_every_n_epochs: 500
+  sample_every_n_epochs: 1
   flow_samples: 1
   sampling_steps: 50
   sampling_center_coords: false
@@ -155,10 +145,8 @@ validation:
     ltol: 0.3
     stol: 0.5
     angle_tol: 10.0
-  log_structures_to_wandb: false
+  log_structures_to_wandb: true
   max_structures_to_log: 5
-  compute_train_match_rate: false
-  max_train_cache_size: 1024
 
 # Prediction configuration
 prediction:
@@ -173,7 +161,7 @@ wandb:
   project: "CatGen"
   entity: null
   mode: "online"
-  tags: ["optimizer", "muon", "scale3"]
-  notes: "Optimizer comparison - MuOn (lr=0.02, scale3 model)"
-  watch_gradients: false
+  tags: ["overfit_small", "test"]
+  notes: "Quick test with 32-sample toy dataset"
+  watch_gradients: true
   watch_freq: 100

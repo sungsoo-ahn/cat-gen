@@ -216,6 +216,7 @@ def main(config_path: str, overwrite: bool = False, debug: bool = False):
         num_sanity_val_steps=training_config["num_sanity_val_steps"],
         limit_train_batches=training_config.get("limit_train_batches"),
         limit_val_batches=training_config.get("limit_val_batches"),
+        log_every_n_steps=training_config.get("log_every_n_steps", 50),
         callbacks=build_callbacks(config, output_dir),
         logger=wandb_logger,
         default_root_dir=str(output_dir),

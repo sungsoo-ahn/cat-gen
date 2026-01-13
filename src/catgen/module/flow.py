@@ -95,12 +95,7 @@ class FlowModule(nn.Module):
         )
 
         # Output projection
-        self.output_projection = OutputProjection(
-            hidden_dim=hidden_dim,
-            coord_output_scale=kwargs.get("coord_output_scale", 3.0),
-            output_init=kwargs.get("output_init", "default"),
-            output_init_scale=kwargs.get("output_init_scale", 0.01),
-        )
+        self.output_projection = OutputProjection(hidden_dim=hidden_dim)
 
     def forward(self, prim_slab_r_noisy, ads_r_noisy, prim_virtual_noisy, supercell_virtual_noisy, sf_noisy, times, feats, multiplicity=1):
         """

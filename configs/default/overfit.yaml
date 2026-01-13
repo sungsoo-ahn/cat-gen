@@ -42,10 +42,6 @@ model:
     positional_encoding: false
     attention_impl: "flash"
     activation_checkpointing: false
-    # Output initialization for lower initial loss
-    coord_output_scale: 1.0  # Reduced from 3.0 to bound initial predictions tighter
-    output_init: "zero"  # Zero-init output layers so predictions start at 0
-    output_init_scale: 0.01  # Only used if output_init: "small"
 
   prior_sampler_args:
     coord_std: 1.0
@@ -87,6 +83,7 @@ model:
 
 # Training configuration - same as default but more epochs
 training:
+  optimizer: "adamw"  # Default optimizer
   max_epochs: 10000  # More epochs for overfitting
   accelerator: "gpu"
   devices: 1
@@ -149,8 +146,6 @@ validation:
     angle_tol: 10.0
   log_structures_to_wandb: true
   max_structures_to_log: 5
-  compute_train_match_rate: true
-  max_train_cache_size: 1024
 
 # Prediction configuration
 prediction:

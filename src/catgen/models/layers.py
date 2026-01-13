@@ -228,13 +228,7 @@ class OutputProjection(Module):
 
     NUM_VIRTUAL_ATOMS = 6
 
-    def __init__(
-        self,
-        hidden_dim: int,
-        coord_output_scale: float = 3.0,
-        output_init: str = "default",
-        output_init_scale: float = 0.01,
-    ):
+    def __init__(self, hidden_dim: int):
         super().__init__()
 
         # Per-atom coordinate projections
@@ -256,25 +250,6 @@ class OutputProjection(Module):
             nn.LayerNorm(hidden_dim), LinearNoBias(hidden_dim, 1)
         )
 
-        self.coord_output_scale = coord_output_scale
-        self._init_output_layers(output_init, output_init_scale)
-
-    def _init_output_layers(self, init_type: str, scale: float):
-        """Initialize output projection layers."""
-        projections = [
-            self.feats_to_prim_slab_coords,
-            self.feats_to_ads_coords,
-            self.feats_to_prim_virtual_coords,
-            self.feats_to_supercell_virtual_coords,
-            self.feats_to_scaling_factor,
-        ]
-        for proj in projections:
-            linear = proj[-1]
-            if init_type == "zero":
-                nn.init.zeros_(linear.weight)
-            elif init_type == "small":
-                nn.init.normal_(linear.weight, mean=0.0, std=scale)
-
     def forward(self, h, n_prim_slab, n_ads, prim_slab_mask):
         """
         Args:
@@ -292,24 +267,16 @@ class OutputProjection(Module):
         h_prim_virtual = h[:, n_prim_slab + n_ads:n_prim_slab + n_ads + 3, :]
         h_supercell_virtual = h[:, n_prim_slab + n_ads + 3:, :]
 
-        # Coordinate predictions (bounded with tanh)
+        # Coordinate predictions
         prim_slab_r = self.feats_to_prim_slab_coords(h_prim_slab)
-        prim_slab_r = torch.tanh(prim_slab_r) * self.coord_output_scale
-
         ads_r = self.feats_to_ads_coords(h_ads)
-        ads_r = torch.tanh(ads_r) * self.coord_output_scale
-
         prim_virtual = self.feats_to_prim_virtual_coords(h_prim_virtual)
-        prim_virtual = torch.tanh(prim_virtual) * self.coord_output_scale
-
         supercell_virtual = self.feats_to_supercell_virtual_coords(h_supercell_virtual)
-        supercell_virtual = torch.tanh(supercell_virtual) * self.coord_output_scale
 
         # Scaling factor from global pooling (prim_slab atoms only)
         num_atoms = prim_slab_mask.sum(dim=1, keepdim=True)
         h_global = torch.sum(h_prim_slab * prim_slab_mask[..., None], dim=1) / (num_atoms + EPS_NUMERICAL)
         sf = self.feats_to_scaling_factor(h_global).squeeze(-1)
-        sf = torch.tanh(sf) * self.coord_output_scale
 
         return {
             "prim_slab_r_update": prim_slab_r,
