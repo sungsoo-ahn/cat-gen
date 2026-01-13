@@ -1,5 +1,5 @@
 # Overfitting test configuration
-# Uses a small toy dataset for fast loading (~300 samples vs 460K)
+# Uses toy dataset for fast loading
 # Purpose: Verify model can memorize a small dataset before scaling up
 #
 # To create the toy dataset:
@@ -15,15 +15,15 @@ experiment:
 
 code_version: "overfit"
 
-# Data configuration - uses small toy dataset for fast loading
+# Data configuration - uses toy dataset for fast loading
 data:
   train_lmdb_path: "dataset/toy/dataset.lmdb"
   val_lmdb_path: "dataset/toy/dataset.lmdb"  # Use train data for validation
   test_lmdb_path: null
   batch_size:
-    train: 300  # Small batch size for overfitting
-    val: 300
-    test: 300
+    train: 64
+    val: 64
+    test: 64
   num_workers:
     train: 4
     val: 4
@@ -99,8 +99,8 @@ training:
   val_check_interval: 1
   check_val_every_n_epoch: 1000  # Validate periodically
 
-  limit_train_batches: 1  # 1 batch of 300 samples per epoch
-  limit_val_batches: 1
+  limit_train_batches: null  # Use all batches
+  limit_val_batches: null
 
   train_multiplicity: 1
   loss_type: "l2"
@@ -150,7 +150,7 @@ validation:
   log_structures_to_wandb: true
   max_structures_to_log: 5
   compute_train_match_rate: true
-  max_train_cache_size: 500
+  max_train_cache_size: 1024
 
 # Prediction configuration
 prediction:
@@ -166,6 +166,6 @@ wandb:
   entity: null
   mode: "online"
   tags: ["overfit"]
-  notes: "Overfitting test - same config as default but with 300 samples"
+  notes: "Overfitting test with batch size 64"
   watch_gradients: true
   watch_freq: 100
