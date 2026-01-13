@@ -5,6 +5,7 @@ import tempfile
 from typing import Any, Optional
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 import wandb
 from ase.io import write as ase_write
@@ -318,6 +319,10 @@ class CatGen(LightningModule):
         # Store timesteps for monitoring callback
         self._last_timesteps = out.get("times", None)
 
+        # Check if LDDT loss is enabled
+        lddt_weight = self.training_args.get("lddt_loss_weight", 0.0)
+        compute_lddt = lddt_weight > 0
+
         # Compute losses
         flow_loss_dict, check_dict = self.structure_module.compute_loss(
             batch,
@@ -325,6 +330,9 @@ class CatGen(LightningModule):
             multiplicity=self.training_args["train_multiplicity"],
             loss_type=self.training_args["loss_type"],
             loss_space=self.training_args.get("loss_space", "raw"),
+            compute_lddt=compute_lddt,
+            lddt_cutoff=self.training_args.get("lddt_cutoff", 15.0),
+            lddt_use_pbc=self.training_args.get("lddt_use_pbc", True),
         )
 
         # Calculate total weighted loss
@@ -340,6 +348,19 @@ class CatGen(LightningModule):
             + self.training_args["scaling_factor_loss_weight"]
             * flow_loss_dict["scaling_factor_loss"].mean()
         )
+
+        # Add LDDT loss with time-dependent weighting
+        if compute_lddt and "lddt_loss" in flow_loss_dict:
+            lddt_time_scale = self.training_args.get("lddt_time_weight_scale", 8.0)
+
+            if lddt_time_scale > 0 and "times" in out:
+                # α(t) = 1 + scale * ReLU(t - 0.5) (SimpleFold finetuning schedule)
+                time_weight = 1.0 + lddt_time_scale * F.relu(out["times"] - 0.5)
+                weighted_lddt = (flow_loss_dict["lddt_loss"] * time_weight).mean()
+            else:
+                weighted_lddt = flow_loss_dict["lddt_loss"].mean()
+
+            total_loss = total_loss + lddt_weight * weighted_lddt
 
         # Loggings
         batch_size = batch["ref_prim_slab_element"].shape[0]

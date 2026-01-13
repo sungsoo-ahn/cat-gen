@@ -104,6 +104,11 @@ def create_model(config: dict) -> CatGen:
             "supercell_virtual_loss_weight": training_config["supercell_virtual_loss_weight"],
             "scaling_factor_loss_weight": training_config["scaling_factor_loss_weight"],
             "loss_space": training_config.get("loss_space", "raw"),
+            # LDDT loss configuration
+            "lddt_loss_weight": training_config.get("lddt_loss_weight", 0.0),
+            "lddt_cutoff": training_config.get("lddt_cutoff", 15.0),
+            "lddt_use_pbc": training_config.get("lddt_use_pbc", True),
+            "lddt_time_weight_scale": training_config.get("lddt_time_weight_scale", 8.0),
             # Optimizer configuration
             "optimizer": training_config.get("optimizer", "adamw"),
             "lr": training_config["lr"],

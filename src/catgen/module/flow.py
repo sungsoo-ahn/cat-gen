@@ -408,7 +408,17 @@ class AtomFlowMatching(Module):
 
         return out_dict
 
-    def compute_loss(self, feats, out_dict, multiplicity=1, loss_type: str = "l2", loss_space: str = "raw") -> tuple[dict, dict]:
+    def compute_loss(
+        self,
+        feats,
+        out_dict,
+        multiplicity=1,
+        loss_type: str = "l2",
+        loss_space: str = "raw",
+        compute_lddt: bool = False,
+        lddt_cutoff: float = 15.0,
+        lddt_use_pbc: bool = True,
+    ) -> tuple[dict, dict]:
         """Compute losses for prim_slab coords, adsorbate coords, virtual coords, and scaling factor.
 
         Args:
@@ -417,6 +427,9 @@ class AtomFlowMatching(Module):
             multiplicity: number of samples per input
             loss_type: "l1" or "l2" loss
             loss_space: "raw" for loss in Angstrom space, "normalized" for unit-variance space
+            compute_lddt: whether to compute LDDT loss
+            lddt_cutoff: cutoff distance for LDDT neighbor atoms (Angstroms)
+            lddt_use_pbc: whether to use periodic boundary conditions for LDDT
 
         Returns:
             Dictionary with per-sample losses:
@@ -425,6 +438,7 @@ class AtomFlowMatching(Module):
                 - prim_virtual_loss: (B * multiplicity,) primitive virtual coord loss
                 - supercell_virtual_loss: (B * multiplicity,) supercell virtual coord loss
                 - scaling_factor_loss: (B * multiplicity,) scaling factor loss
+                - lddt_loss: (B * multiplicity,) LDDT loss (if compute_lddt=True)
         """
         if loss_type == "l2":
             loss_fn = F.mse_loss
@@ -511,6 +525,26 @@ class AtomFlowMatching(Module):
             "supercell_virtual_loss": supercell_virtual_loss,
             "scaling_factor_loss": scaling_factor_loss,
         }
+
+        # Compute LDDT loss if requested
+        if compute_lddt:
+            from src.catgen.models.loss.lddt import compute_lddt_loss
+
+            # LDDT is computed in raw Angstrom space on denoised coords
+            # Use ground truth lattice vectors for neighbor definition
+            lddt_pred_coords = out_dict["denoised_prim_slab_coords"]
+            lddt_true_coords = out_dict["aligned_true_prim_slab_coords"]
+            lddt_lattice = out_dict["aligned_true_prim_virtual_coords"]
+
+            lddt_loss = compute_lddt_loss(
+                pred_coords=lddt_pred_coords,
+                true_coords=lddt_true_coords,
+                atom_mask=prim_slab_mask,
+                lattice_vectors=lddt_lattice,
+                cutoff=lddt_cutoff,
+                use_pbc=lddt_use_pbc,
+            )
+            loss_dict["lddt_loss"] = lddt_loss
 
         check_dict = {}
 

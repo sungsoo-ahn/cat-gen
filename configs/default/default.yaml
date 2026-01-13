@@ -112,6 +112,13 @@ training:
   supercell_virtual_loss_weight: 1.0
   scaling_factor_loss_weight: 1.0
 
+  # LDDT (Local Distance Difference Test) loss configuration
+  # Based on SimpleFold (https://arxiv.org/abs/2509.18480)
+  lddt_loss_weight: 0.0  # 0 = disabled, >0 = enabled
+  lddt_cutoff: 15.0  # Neighbor cutoff distance in Angstroms
+  lddt_use_pbc: true  # Use periodic boundary conditions (minimum image convention)
+  lddt_time_weight_scale: 8.0  # Time-dependent weighting: α(t) = 1 + scale * ReLU(t - 0.5), 0 = constant
+
   # Optimizer
   lr: 0.0003
   weight_decay: 0.001
