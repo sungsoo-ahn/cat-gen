@@ -93,8 +93,7 @@ def create_model(config: dict) -> CatGen:
     prediction_config = config.get("prediction", {})
 
     model = CatGen(
-        atom_s=model_config["atom_s"],
-        token_s=model_config["token_s"],
+        hidden_dim=model_config["hidden_dim"],
         flow_model_args=model_config["flow_model_args"],
         training_args={
             "train_multiplicity": training_config["train_multiplicity"],

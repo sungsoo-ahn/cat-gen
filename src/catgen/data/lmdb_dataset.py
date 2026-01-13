@@ -318,16 +318,10 @@ def collate_fn_with_dynamic_padding(
         "prim_slab_cart_coords": prim_slab_positions,  # [B, n_prim_slab_max, 3]
         
         "prim_slab_atom_pad_mask": prim_slab_mask.float(),  # [B, n_prim_slab_max] - float for masking
-        # Token fields for prim_slab (each atom = individual token)
-        "prim_slab_atom_to_token": torch.eye(n_prim_slab_atoms_max).unsqueeze(0).expand(len(batch), -1, -1).clone(),  # [B, N, N] identity
-        "prim_slab_token_pad_mask": prim_slab_mask.float(),  # [B, N] - same as prim_slab_atom_pad_mask
         # Model input fields - Adsorbate
         "ads_cart_coords": adsorbate_pos,  # [B, n_adsorbate_max, 3]
         "ref_ads_element": adsorbate_atomic_numbers,  # [B, n_adsorbate_max]
         "ads_atom_pad_mask": adsorbate_mask.float(),  # [B, n_adsorbate_max] - float for masking
-        # Token fields for adsorbate (each atom = individual token)
-        "ads_atom_to_token": torch.eye(n_adsorbate_atoms_max).unsqueeze(0).expand(len(batch), -1, -1).clone(),  # [B, M, M] identity
-        "ads_token_pad_mask": adsorbate_mask.float(),  # [B, M] - same as ads_atom_pad_mask
         # Scaling factor: (n_vac + n_slab) / n_slab
         "scaling_factor": torch.tensor(scaling_factors, dtype=torch.float),  # [B]
         # Reference energy
@@ -521,16 +515,10 @@ def collate_pyg_with_dynamic_padding(
         prim_slab_cart_coords=prim_slab_positions,  # [B, n_prim_slab_max, 3]
         ref_prim_slab_element=prim_slab_atomic_numbers,  # [B, n_prim_slab_max]
         prim_slab_atom_pad_mask=prim_slab_mask.float(),  # [B, n_prim_slab_max] - float for masking
-        # Token fields for prim_slab (each atom = individual token)
-        prim_slab_atom_to_token=torch.eye(n_prim_slab_atoms_max).unsqueeze(0).expand(batch_size, -1, -1).clone(),  # [B, N, N] identity
-        prim_slab_token_pad_mask=prim_slab_mask.float(),  # [B, N] - same as prim_slab_atom_pad_mask
         # Model input fields - Adsorbate
         ads_cart_coords=adsorbate_pos,  # [B, n_adsorbate_max, 3]
         ref_ads_element=adsorbate_atomic_numbers,  # [B, n_adsorbate_max]
         ads_atom_pad_mask=adsorbate_mask.float(),  # [B, n_adsorbate_max] - float for masking
-        # Token fields for adsorbate (each atom = individual token)
-        ads_atom_to_token=torch.eye(n_adsorbate_atoms_max).unsqueeze(0).expand(batch_size, -1, -1).clone(),  # [B, M, M] identity
-        ads_token_pad_mask=adsorbate_mask.float(),  # [B, M] - same as ads_atom_pad_mask
         # Scaling factor: (n_vac + n_slab) / n_slab
         scaling_factor=torch.tensor([d.scaling_factor for d in data_list], dtype=torch.float),  # [B]
         

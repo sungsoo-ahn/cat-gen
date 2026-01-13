@@ -8,9 +8,9 @@ from torch.nn import Module
 
 from src.catgen.data.prior import PriorSampler, CatPriorSampler
 from src.catgen.models.layers import (
-    AtomAttentionEncoder,
-    AtomAttentionDecoder,
-    TokenTransformer,
+    InputEmbedder,
+    TransformerBackbone,
+    OutputProjection,
 )
 from src.catgen.models.utils import LinearNoBias, center_random_augmentation, default
 from src.catgen.scripts.refine_sc_mat import refine_sc_mat
@@ -60,80 +60,47 @@ def compute_flow_vector(
 class FlowModule(nn.Module):
     """
     Flow model that jointly processes primitive slab and adsorbate atoms.
-    
+
     Architecture:
-        1. Encoder: jointly encodes prim_slab and adsorbate atoms
-        2. Token Transformer: processes token-level representations
-        3. Decoder: outputs separate heads for prim_slab coords, ads coords, lattice, and supercell matrix
+        1. InputEmbedder: embeds all input features into hidden representations
+        2. TransformerBackbone: single DiT transformer for joint attention
+        3. OutputProjection: projects to coordinate predictions
     """
-    
+
     def __init__(
         self,
-        atom_s,
-        token_s,
-        atom_encoder_depth,
-        atom_encoder_heads,
-        atom_encoder_positional_encoding,
-        token_transformer_depth,
-        token_transformer_heads,
-        atom_decoder_depth,
-        atom_decoder_heads,
-        attention_impl,
+        hidden_dim,
+        transformer_depth,
+        transformer_heads,
+        positional_encoding=False,
+        attention_impl="pytorch",
         activation_checkpointing=False,
         **kwargs,
     ):
         super().__init__()
 
-        # Encoder (jointly processes prim_slab + adsorbate)
-        self.atom_encoder = AtomAttentionEncoder(
-            atom_s=atom_s,
-            atom_encoder_depth=atom_encoder_depth,
-            atom_encoder_heads=atom_encoder_heads,
-            positional_encoding=atom_encoder_positional_encoding,
-            attention_impl=attention_impl,
-            activation_checkpointing=activation_checkpointing,
-        )
-        self.atom_to_token_trans = nn.Sequential(
-            LinearNoBias(atom_s, token_s), nn.ReLU()
+        # Input embedding
+        self.input_embedder = InputEmbedder(
+            hidden_dim=hidden_dim,
+            positional_encoding=positional_encoding,
         )
 
-        # Transformer
-        self.token_transformer = TokenTransformer(
-            token_s=token_s,
-            token_transformer_depth=token_transformer_depth,
-            token_transformer_heads=token_transformer_heads,
+        # Transformer backbone
+        self.transformer = TransformerBackbone(
+            hidden_dim=hidden_dim,
+            depth=transformer_depth,
+            heads=transformer_heads,
             attention_impl=attention_impl,
             activation_checkpointing=activation_checkpointing,
-        )
-        self.token_to_atom_trans = nn.Sequential(
-            LinearNoBias(token_s, atom_s), nn.ReLU()
         )
 
-        # Decoder (outputs prim_slab coords, ads coords, lattice, supercell matrix)
-        self.atom_decoder = AtomAttentionDecoder(
-            atom_s=atom_s,
-            atom_decoder_depth=atom_decoder_depth,
-            atom_decoder_heads=atom_decoder_heads,
-            attention_impl=attention_impl,
-            activation_checkpointing=activation_checkpointing,
+        # Output projection
+        self.output_projection = OutputProjection(
+            hidden_dim=hidden_dim,
             coord_output_scale=kwargs.get("coord_output_scale", 3.0),
             output_init=kwargs.get("output_init", "default"),
             output_init_scale=kwargs.get("output_init_scale", 0.01),
         )
-
-    def _aggregate_atoms_to_tokens(self, atom_feats, atom_to_token, multiplicity=1):
-        atom_to_token = atom_to_token.float()
-        atom_to_token = atom_to_token.repeat_interleave(multiplicity, 0)
-        atom_to_token_mean = atom_to_token / (
-            atom_to_token.sum(dim=1, keepdim=True) + 1e-6
-        )
-        token_feats = torch.bmm(atom_to_token_mean.transpose(1, 2), atom_feats)
-        return token_feats
-
-    def _broadcast_tokens_to_atoms(self, token_feats, atom_to_token, multiplicity=1):
-        atom_to_token = atom_to_token.repeat_interleave(multiplicity, 0)
-        atom_feats = torch.bmm(atom_to_token, token_feats)
-        return atom_feats
 
     def forward(self, prim_slab_r_noisy, ads_r_noisy, prim_virtual_noisy, supercell_virtual_noisy, sf_noisy, times, feats, multiplicity=1):
         """
@@ -157,65 +124,23 @@ class FlowModule(nn.Module):
                 - supercell_virtual_update: (B*mult, 3, 3)
                 - sf_update: (B*mult,)
         """
-        # Encoder (atom-level attention, joint processing including virtual atoms)
-        h_atoms, n_prim_slab, n_ads = self.atom_encoder(
+        # Embed input features
+        h, mask, n_prim_slab, n_ads = self.input_embedder(
             prim_slab_x_t=prim_slab_r_noisy,
             ads_x_t=ads_r_noisy,
             prim_virtual_t=prim_virtual_noisy,
             supercell_virtual_t=supercell_virtual_noisy,
             sf_t=sf_noisy,
-            t=times,
             feats=feats,
             multiplicity=multiplicity,
         )
 
-        # Aggregate to token-level
-        # Create joint atom_to_token matrix (including virtual atoms)
-        prim_slab_atom_to_token = feats["prim_slab_atom_to_token"]  # (B, N, N)
-        ads_atom_to_token = feats["ads_atom_to_token"]  # (B, M, M)
+        # Transformer backbone
+        h = self.transformer(h, times, mask)
 
-        # Block diagonal concatenation for joint atom_to_token
-        B = prim_slab_atom_to_token.shape[0]
-        N = prim_slab_atom_to_token.shape[1]
-        M = ads_atom_to_token.shape[1]
-        NUM_VIRTUAL = 6  # 3 primitive + 3 supercell virtual atoms
-
-        # Create block diagonal matrix (now includes virtual atoms)
-        # Total atoms: N + M + 6
-        total_atoms = N + M + NUM_VIRTUAL
-        joint_atom_to_token = torch.zeros(B, total_atoms, total_atoms, device=h_atoms.device, dtype=h_atoms.dtype)
-        joint_atom_to_token[:, :N, :N] = prim_slab_atom_to_token
-        joint_atom_to_token[:, N:N+M, N:N+M] = ads_atom_to_token
-        # Virtual atoms: each virtual atom is its own token (identity mapping)
-        for i in range(NUM_VIRTUAL):
-            joint_atom_to_token[:, N+M+i, N+M+i] = 1.0
-
-        h_atoms_to_tokens = self.atom_to_token_trans(h_atoms)
-        h_tokens = self._aggregate_atoms_to_tokens(
-            atom_feats=h_atoms_to_tokens,
-            atom_to_token=joint_atom_to_token,
-            multiplicity=multiplicity,
-        )
-
-        # Trunk (token-level attention)
-        h_tokens = self.token_transformer(
-            x=h_tokens, t=times, feats=feats, multiplicity=multiplicity
-        )
-
-        # Broadcast to atom-level
-        h_tokens_to_atoms = self.token_to_atom_trans(h_tokens)
-        h_atoms = h_atoms + self._broadcast_tokens_to_atoms(
-            token_feats=h_tokens_to_atoms,
-            atom_to_token=joint_atom_to_token,
-            multiplicity=multiplicity,
-        )  # skip connection
-
-        # Decoder (atom-level attention, separate output heads)
-        # Decoder now returns a dict with all outputs including ads_center_update and ads_rel_update
-        decoder_out = self.atom_decoder(
-            x=h_atoms, t=times, feats=feats, n_prim_slab=n_prim_slab, n_ads=n_ads, multiplicity=multiplicity
-        )
-        return decoder_out
+        # Output projection
+        prim_slab_mask = feats["prim_slab_atom_pad_mask"].repeat_interleave(multiplicity, 0)
+        return self.output_projection(h, n_prim_slab, n_ads, prim_slab_mask)
 
 
 class AtomFlowMatching(Module):

@@ -121,8 +121,7 @@ class CombinedMuonAdamW(torch.optim.Optimizer):
 class CatGen(LightningModule):
     def __init__(
         self,
-        atom_s: int,
-        token_s: int,
+        hidden_dim: int,
         flow_model_args: dict[str, Any],
         training_args: dict[str, Any],
         validation_args: dict[str, Any],
@@ -180,8 +179,7 @@ class CatGen(LightningModule):
 
         self.structure_module = AtomFlowMatching(
             flow_model_args={
-                "atom_s": atom_s,
-                "token_s": token_s,
+                "hidden_dim": hidden_dim,
                 **flow_model_args,
             },
             prior_sampler=prior_sampler,
